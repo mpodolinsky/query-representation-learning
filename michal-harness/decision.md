@@ -7,7 +7,7 @@ Items marked **[team]** affect other components and need sign-off from the owner
 
 - Concise, readable, clean code. Keep the number of files to a minimum.
 - `router.py`: kNN estimator, routing, single-best baseline, λ sweep, area `A`, gain, `evaluate`. (Probes-to-target is a TODO.)
-- `plots.py`: shared figure style and plot functions.
+- `plots.py`: one shared style and all figures: cost-quality curves, gain against probes, the PCA views, probes, neighbors (see the Plots section).
 - `test_router.py`: sanity tests on synthetic data (oracle gives `A = 1`, perfect `q̂` matches the oracle).
 - Data loading belongs to Arman; embeddings belong to Nikhilesh and Alexandros.
 
@@ -19,6 +19,7 @@ Items marked **[team]** affect other components and need sign-off from the owner
   `evaluate` calls it once for the pool and once for the new model `m'` on its probes.
 - Neighbor search: scikit-learn `NearestNeighbors` (installed in the project `.venv`, together with pytest).
 - Routing rule: `argmax_m q̂_m(x) − λ·c_t(m)` (paper Eq. 1).
+  - Ties (equal `q̂ − λ·c`, common because `q̂` is a multiple of `1/k` for 0/1 scores) go to the first model in `data.models` order (`argmax`).
 - Distance: **Euclidean (L2)**, `d(x, y) = ‖x − y‖₂`.
   - It preserves the scale information of each feature, which matters for the standardized handcrafted features (the paper standardizes them so no single feature dominates the distance).
   - It behaves better on concatenated vectors (handcrafted + sentence embedding). Cosine ignores magnitude and mixes the two parts awkwardly.
@@ -57,24 +58,40 @@ Items marked **[team]** affect other components and need sign-off from the owner
 
 ## Interface `evaluate(data, fit, ...)` **[team: all]**
 
-- `data` is a `Data` container (queries, models, scores `S`, mean costs, train/test indices) in `router.py`. It is a stand-in for Arman's table until his schema is fixed.
+- `data` is a `Data` container (queries, models, scores `S`, mean costs, train/val/test indices, optional `theme`) in `router.py`. It is a stand-in for Arman's table until his schema is fixed.
 
 - `fit` is a factory `fit(train_models) -> embed_fn`, with `embed_fn(list[str]) -> ndarray`.
   Frozen embeddings ignore the `train_models` argument. Learned `φ_θ` retrains without `m'` for each leave-model-out run.
   `evaluate` calls `fit` once per run with the pool minus the held-out model.
 - The setting is passed as plain arguments, not an object: `evaluate(fit, new_model=None, n_probes=None, seed=0)`.
   `new_model=None` is the seen-model setting. Otherwise it is the unseen setting with `n_probes` probes.
-- Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200), n_boot=1000)`. It returns `gain`, `gain_ci`, `A`, `A_single_best`, `k` (the one used), the λ grid and the three curves (router, single best, oracle). `n_boot=0` skips the bootstrap. `tune_k=True` ignores `k`.
+- Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200), n_boot=1000)`. It returns `gain`, `gain_ci`, `A`, `A_single_best`, `k` (the one used), the λ grid, the three curves (router, single best, oracle), the test `Q_hat`, `q_mean`, the `probes` (query indices, None in the seen setting) and the `cost_range`. `n_boot=0` skips the bootstrap. `tune_k=True` ignores `k`.
 - Splits and probe sets come from Arman's output. **Stand-in:** probes are currently drawn by a seeded random sampler inside `evaluate`, to be replaced by his probe sets.
 - `Data` has a `train`, a `val` and a `test` index set. The validation split comes from Arman's output.
 
-## Results format **[team: all]**
+## Results format **[team: all]** (implemented: `Results` in `router.py`)
 
-- One tidy CSV with one row per run (one per seed) and columns
-  `benchmark, embedding, new_model, n_probes, seed, k, gain, A, A_single_best, gain_ci_low, gain_ci_high`.
+- Every experiment writes into its own folder `results/YYYY-MM-DD_HH-MM-SS/`. These folders are **gitignored** (`results/` in `.gitignore`), so outputs are kept locally for reuse and never committed.
+- Contents:
+  - `results.csv`: one row per run (one per seed), columns
+    `run, benchmark, embedding, new_model, n_probes, seed, tune_k, k, gain, gain_ci_low, gain_ci_high, A, A_single_best`.
+    `new_model` and `n_probes` are empty for the seen setting, and the interval is empty if the bootstrap was skipped (`n_boot=0`).
+  - `runs/NNNN.npz`: per run, the λ grid, the three cost-quality curves (router, single best, oracle), the test `q̂` (float64) and the mean qualities used by the single best.
+  - `split.npz`: the train/val/test indices. `meta.json`: creation time, benchmark, git commit (`-dirty` if uncommitted changes), model names and mean costs.
+- Reuse: with `q̂`, the test scores and the costs, the routing, curves, area and gain can be recomputed (a test checks this reproduces the saved curves exactly) without refitting an embedding or rerunning the kNN. This matters because parts of the area definition are still provisional.
 - `seed` covers the probe draw and, for learned embeddings, the training seed. The bootstrap interval is per row.
 - Report the mean gain over seeds, the spread across seeds, and the bootstrap interval, kept separate (a two-stage bootstrap is optional).
-- Sweep curves are saved alongside, so `plots.py` only reads these files.
+- `plots.py` functions take arrays and `evaluate` results. Plotting straight from a saved results folder is not implemented yet.
+
+## Plots (`plots.py`)
+
+- One style for every figure. Categorical colors: scatter plots keep to three, because more cannot be validated for all pairs. Group plots are therefore **small multiples** (one panel per group, the group in blue over all points in gray).
+- k is shown with an ordinal blue ramp (light to dark, up to 4 values); the selected k is thicker.
+- **PCA views** (`pca_project` fits two axes on the training queries; axis labels give the variance share): groups by task type, mean score of each model in hexagonal bins, the model the router picks at one λ, cumulative explained variance (illustrates why raw features would dominate Euclidean distance), the probes of the new model, and one query with its neighbors.
+- **Neighbor plot:** the pool models' neighbors are the `k` nearest training queries. The new model's are the `k` nearest of its probes. Neighbors are computed in the full space, so they can look far apart in 2D. The plot carries that note.
+- Requires `Data.theme` (task type per query) for the theme plot; it comes from Arman's data (the synthetic data uses the cluster).
+- For large data the gray background of a scatter is a fixed random subset of at most 20,000 points.
+- PCA is linear and keeps two directions. A non-linear projection (UMAP, t-SNE) is a possible later addition.
 
 ## Metrics
 
@@ -98,6 +115,10 @@ Items marked **[team]** affect other components and need sign-off from the owner
 - **The train/test split is FIXED.** We use one split (Arman's). The bootstrap interval only measures test-set sampling noise, and seeds only measure probe and training randomness.
   Variation from re-splitting the data is **not** measured, so a small gain on this split may not hold on another. Add several splits if time allows.
 - **Held-out models are separate experiments,** not repeats. The 11 (LLMRouterBench) and 6 (RouterBench) release events are reported one by one. A mean across them is only a summary.
+
+## Optional (decided 2026-11-08)
+
+- **Sensitivity of the gain and `A` to the λ grid and to `k`:** optional, do if time allows. Not required for the main results.
 
 ## Open
 

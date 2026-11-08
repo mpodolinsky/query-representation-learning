@@ -1,9 +1,18 @@
+import csv
 import dataclasses
+import json
+import re
 
+import matplotlib
 import numpy as np
 import pytest
 
-from router import Data, area, bootstrap_gain_ci, evaluate, knn_estimate, route, select_k
+matplotlib.use("Agg")  # no display needed; set before plots imports pyplot
+import matplotlib.pyplot as plt
+
+import plots
+from router import (Data, Results, area, bootstrap_gain_ci, curve, evaluate, knn_estimate, knn_indices, realized,
+                    route, select_k)
 
 
 def make_data(Q=4000, M=5, C=6, dim=8, seed=0):
@@ -18,7 +27,7 @@ def make_data(Q=4000, M=5, C=6, dim=8, seed=0):
     order = rng.permutation(Q)
     a, b = int(0.6 * Q), int(0.7 * Q)  # 60% train, 10% validation, 30% test
     data = Data([str(i) for i in range(Q)], [f"model{m}" for m in range(M)], S, cost,
-                train=order[:a], val=order[a:b], test=order[b:])
+                train=order[:a], val=order[a:b], test=order[b:], theme=cluster)
     fit = lambda _pool: lambda queries: E[[int(q) for q in queries]]  # frozen: ignores the pool
     return data, fit
 
@@ -169,3 +178,133 @@ def test_select_k_is_quiet_when_best_k_is_interior_or_grid_has_one_value(synth, 
     select_k(E, data, pool, k_grid=(3, 10, 100, 300, 1000))
     select_k(E, data, pool, k_grid=(10,))
     assert capsys.readouterr().out == ""
+
+
+def test_results_folder_is_timestamped_and_holds_everything(synth, tmp_path):
+    data, fit = synth
+    out = Results(data, "synthetic", root=tmp_path)
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", out.dir.name) and out.dir.parent == tmp_path
+    out.run("frozen", fit, n_boot=20)
+    assert sorted(p.name for p in out.dir.iterdir()) == ["meta.json", "results.csv", "runs", "split.npz"]
+    meta = json.loads((out.dir / "meta.json").read_text())
+    assert meta["benchmark"] == "synthetic" and meta["models"] == data.models and meta["cost"] == data.cost.tolist()
+    assert np.array_equal(np.load(out.dir / "split.npz")["test"], data.test)
+
+
+def test_results_csv_has_one_row_per_run(synth, tmp_path):
+    data, fit = synth
+    out = Results(data, "synthetic", root=tmp_path)
+    seen = out.run("frozen", fit, n_boot=20)
+    unseen = out.run("frozen", fit, new_model="model2", n_probes=50, seed=3, tune_k=True, n_boot=0)
+    rows = list(csv.DictReader(open(out.dir / "results.csv")))
+    assert [r["run"] for r in rows] == ["0000", "0001"]
+    assert (rows[0]["new_model"], rows[0]["n_probes"], rows[0]["tune_k"]) == ("", "", "False")
+    assert float(rows[0]["gain"]) == pytest.approx(seen["gain"]) and float(rows[0]["gain_ci_low"]) < seen["gain"]
+    assert (rows[1]["new_model"], rows[1]["n_probes"], rows[1]["seed"], rows[1]["tune_k"]) == ("model2", "50", "3", "True")
+    assert int(rows[1]["k"]) == unseen["k"] and rows[1]["gain_ci_low"] == ""  # n_boot=0: no interval
+
+
+def test_saved_files_are_enough_to_redo_the_routing(synth, tmp_path):
+    data, fit = synth
+    out = Results(data, "synthetic", root=tmp_path)
+    res = out.run("frozen", fit, n_boot=0)
+    run = np.load(out.dir / "runs" / "0000.npz")
+    test = np.load(out.dir / "split.npz")["test"]
+    cost = np.array(json.loads((out.dir / "meta.json").read_text())["cost"])
+    again = curve(realized(run["Q_hat"], data.S[test], cost, run["lambdas"]))  # no embedding, no kNN
+    assert np.array_equal(again, run["curve_router"])  # exact: ties in q̂ − λ·cost resolve identically
+    assert np.allclose(run["curve_router"], res["curves"]["router"])
+
+
+# ---------------------------------------------------------------- neighbors, probes, plots
+
+@pytest.fixture(autouse=True)
+def close_figures():
+    yield
+    plt.close("all")
+
+
+def test_knn_estimate_is_the_mean_over_knn_indices():
+    rng = np.random.default_rng(0)
+    E, S, Q = rng.normal(size=(60, 3)), rng.random((60, 4)), rng.normal(size=(5, 3))
+    idx = knn_indices(E, Q, k=7)
+    assert idx.shape == (5, 7)
+    assert np.allclose(knn_estimate(E, S, Q, k=7), S[idx].mean(1))
+    assert knn_indices(E, Q, k=500).shape == (5, 60)  # capped at the number of labeled queries
+
+
+def test_evaluate_returns_the_probes_and_the_cost_range(synth):
+    data, fit = synth
+    seen = evaluate(data, fit, n_boot=0)
+    unseen = evaluate(data, fit, new_model="model2", n_probes=30, n_boot=0)
+    assert seen["probes"] is None
+    assert len(unseen["probes"]) == 30 and np.isin(unseen["probes"], data.train).all()
+    assert seen["cost_range"] == (data.cost.min(), data.cost.max())
+
+
+def test_results_save_the_probes_of_unseen_runs_only(synth, tmp_path):
+    data, fit = synth
+    out = Results(data, "synthetic", root=tmp_path)
+    out.run("frozen", fit, n_boot=0)
+    unseen = out.run("frozen", fit, new_model="model2", n_probes=30, n_boot=0)
+    assert "probes" not in np.load(out.dir / "runs" / "0000.npz")
+    assert np.array_equal(np.load(out.dir / "runs" / "0001.npz")["probes"], unseen["probes"])
+
+
+@pytest.fixture(scope="module")
+def projected(synth):
+    data, fit = synth
+    E = fit(None)(data.queries)
+    Z, ratio = plots.pca_project(E, data.train)
+    return data, E, Z, ratio
+
+
+def test_pca_project_is_fitted_on_the_given_rows(projected):
+    data, E, Z, ratio = projected
+    assert Z.shape == (len(E), 2)
+    assert 0 < ratio[1] <= ratio[0] and ratio.sum() <= 1
+    assert np.allclose(Z[data.train].mean(0), 0, atol=1e-8)  # centered on the training rows, not on all rows
+
+
+def _visible(fig):
+    return sum(ax.get_visible() for ax in fig.axes)
+
+
+def test_cost_quality_plots(synth):
+    data, fit = synth
+    results = {k: evaluate(data, fit, k=k, n_boot=0) for k in (3, 10, 50)}
+    assert len(plots.plot_curves(results[10], "t").axes[0].lines) == 3          # router, single best, oracle
+    assert len(plots.plot_curves_by_k(results, 50, "t").axes[0].lines) == 5     # three k plus single best and oracle
+    assert len(plots.plot_gain_vs_probes([1, 10, 100], np.random.default_rng(0).random((3, 4)), 0.1).axes[0].lines) == 2
+
+
+def test_pca_group_panels_follow_the_groups_and_the_cap(projected):
+    data, E, Z, ratio = projected
+    assert _visible(plots.plot_pca_groups(Z, ratio, data.theme, "t")) == len(np.unique(data.theme))
+    assert _visible(plots.plot_pca_groups(Z, ratio, data.theme, "t", max_groups=2)) == 2
+
+
+def test_pca_quality_has_one_panel_per_model_and_a_colorbar(projected):
+    data, E, Z, ratio = projected
+    fig = plots.plot_pca_quality(Z, ratio, data.S, data.models)
+    assert _visible(fig) == len(data.models) + 1
+
+
+def test_explained_variance_has_one_line_per_embedding_and_is_cumulative(projected):
+    data, E, Z, ratio = projected
+    fig = plots.plot_explained_variance({"a": E, "b": E * 3}, fit_idx=data.train, max_components=5)
+    lines = fig.axes[0].lines
+    assert len(lines) == 2 and (np.diff(lines[0].get_ydata()) >= 0).all() and lines[0].get_ydata()[-1] <= 1
+
+
+def test_probe_and_neighbor_plots_label_what_they_show(projected):
+    data, E, Z, ratio = projected
+    probes, query = data.train[:20], data.test[0]
+    neighbors = data.train[knn_indices(E[data.train], E[[query]], 10)[0]]
+    probe_neighbors = probes[knn_indices(E[probes], E[[query]], 5)[0]]
+    fig = plots.plot_probes(Z, ratio, data.train, probes, routed=data.test[:50])
+    assert [t.get_text() for t in fig.axes[0].get_legend().get_texts()][-1] == "probes (n = 20)"
+    fig = plots.plot_neighbors(Z, ratio, data.train, query, neighbors, probes, probe_neighbors)
+    texts = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
+    assert "query" in texts and "neighbors for the pool models (k = 10)" in texts
+    assert "neighbors for the new model (k = 5)" in texts

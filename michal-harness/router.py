@@ -1,5 +1,10 @@
-"""Router and evaluation harness: kNN quality estimator, λ sweep and area A (paper §2, §7.2)."""
+"""Router and evaluation harness: kNN quality estimator, λ sweep, area A and result saving (paper §2, §7.2)."""
+import csv
+import json
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
@@ -15,14 +20,20 @@ class Data:
     train: np.ndarray   # query indices. WARNING: one fixed split; re-splitting variance is not measured
     val: np.ndarray     # used ONLY to tune k. Embedding training (early stopping included) must never see it
     test: np.ndarray
+    theme: np.ndarray | None = None  # task type of each query (e.g. math, code), used for plots and RQ1a
+
+
+def knn_indices(E_labeled, E_query, k):
+    """(n_query, min(k, n_labeled)) indices of the nearest labeled embeddings (Euclidean), nearest first."""
+    k = min(k, len(E_labeled))
+    return NearestNeighbors(n_neighbors=k).fit(E_labeled).kneighbors(E_query, return_distance=False)
 
 
 def knn_estimate(E_labeled, S_labeled, E_query, k):
     """q̂ of shape (n_query, n_models), Eq. 2: mean score over the k nearest labeled queries (Euclidean).
     The columns of S_labeled are models labeled on the same queries, so they share neighbors."""
-    k = min(k, len(E_labeled))
-    idx = NearestNeighbors(n_neighbors=k).fit(E_labeled).kneighbors(E_query, return_distance=False)
-    return sum(S_labeled[idx[:, j]] for j in range(k)) / k
+    idx = knn_indices(E_labeled, E_query, k)
+    return sum(S_labeled[idx[:, j]] for j in range(idx.shape[1])) / idx.shape[1]
 
 
 def route(scores, cost, lam):
@@ -109,12 +120,13 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
     tr, te = data.train, data.test
     S_tr, S_te = data.S[tr], data.S[te]
 
-    Q_hat, q_mean = np.empty((len(te), M)), np.empty(M)  # kNN estimates, mean train quality
+    Q_hat, q_mean, probe_ids = np.empty((len(te), M)), np.empty(M), None  # kNN estimates, mean train quality
     Q_hat[:, pool] = knn_estimate(E[tr], S_tr[:, pool], E[te], k)
     q_mean[pool] = S_tr[:, pool].mean(0)
     if new is not None:
         probes = np.random.default_rng(seed).choice(len(tr), n_probes, replace=False)  # TODO: Arman's sampler
-        Q_hat[:, [new]] = knn_estimate(E[tr[probes]], S_tr[probes][:, [new]], E[te], k)
+        probe_ids = tr[probes]
+        Q_hat[:, [new]] = knn_estimate(E[probe_ids], S_tr[probes][:, [new]], E[te], k)
         q_mean[new] = S_tr[probes, new].mean()
 
     lambdas = lambda_grid(data.cost)
@@ -128,4 +140,44 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
             "gain_ci": ci,                                       # 95% bootstrap interval over test queries
             "A": areas["router"] / areas["oracle"],              # secondary: area relative to the oracle
             "A_single_best": areas["single_best"] / areas["oracle"],
-            "k": k, "lambdas": lambdas, "curves": curves}
+            "k": k, "lambdas": lambdas, "curves": curves, "Q_hat": Q_hat, "q_mean": q_mean,
+            "probes": probe_ids,  # query indices of the probes (None in the seen setting)
+            "cost_range": c_range}  # the range `A` is integrated over
+
+
+class Results:
+    """Saves the runs of one experiment in a new folder `root/YYYY-MM-DD_HH-MM-SS/` (gitignored):
+    results.csv (one row per run), runs/NNNN.npz (curves, λ grid, test q̂, mean qualities and probe queries of the run),
+    split.npz (train/val/test indices) and meta.json. Everything needed to redo the routing, the area and the
+    gain later, without refitting an embedding or rerunning the kNN, is in there."""
+
+    def __init__(self, data, benchmark, root="results"):
+        self.data, self.benchmark, self.rows = data, benchmark, []
+        self.dir = Path(root) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        (self.dir / "runs").mkdir(parents=True)
+        np.savez_compressed(self.dir / "split.npz", train=data.train, val=data.val, test=data.test)
+        git = lambda *args: subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
+        (self.dir / "meta.json").write_text(json.dumps({
+            "created": datetime.now().isoformat(timespec="seconds"), "benchmark": benchmark,
+            "git_commit": git("rev-parse", "--short", "HEAD") + ("-dirty" if git("status", "--porcelain") else ""),
+            "models": data.models, "cost": data.cost.tolist()}, indent=2))
+
+    def run(self, embedding, fit, new_model=None, n_probes=None, seed=0, **eval_kwargs):
+        """Evaluate `fit` with `evaluate`, save the run, and return the `evaluate` result.
+        `embedding` is the name written in the results table. q̂ is stored in float64 on purpose: routing ties
+        (equal q̂ − λ·cost) go to the first model, and float32 rounding would break them differently."""
+        res = evaluate(self.data, fit, new_model, n_probes, seed, **eval_kwargs)
+        run_id = f"{len(self.rows):04d}"
+        np.savez_compressed(self.dir / "runs" / f"{run_id}.npz", lambdas=res["lambdas"], q_mean=res["q_mean"],
+                            Q_hat=res["Q_hat"], **({} if res["probes"] is None else {"probes": res["probes"]}),
+                            **{f"curve_{name}": c for name, c in res["curves"].items()})
+        lo, hi = res["gain_ci"] or ("", "")
+        self.rows.append({"run": run_id, "benchmark": self.benchmark, "embedding": embedding,
+                          "new_model": new_model or "", "n_probes": n_probes or "", "seed": seed,
+                          "tune_k": eval_kwargs.get("tune_k", False), "k": res["k"], "gain": res["gain"],
+                          "gain_ci_low": lo, "gain_ci_high": hi, "A": res["A"], "A_single_best": res["A_single_best"]})
+        with open(self.dir / "results.csv", "w", newline="") as f:  # rewritten each run: partial results survive a crash
+            writer = csv.DictWriter(f, fieldnames=self.rows[0])
+            writer.writeheader()
+            writer.writerows(self.rows)
+        return res
