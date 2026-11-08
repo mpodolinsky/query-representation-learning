@@ -192,7 +192,7 @@ def test_select_k_is_quiet_when_best_k_is_interior_or_grid_has_one_value(synth, 
 def test_results_folder_is_timestamped_and_holds_everything(synth, tmp_path):
     data, fit = synth
     out = Results(data, "synthetic", root=tmp_path)
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", out.dir.name) and out.dir.parent == tmp_path
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_split0", out.dir.name) and out.dir.parent == tmp_path
     out.run("frozen", fit, n_boot=20)
     assert sorted(p.name for p in out.dir.iterdir()) == ["meta.json", "results.csv", "runs", "split.npz"]
     meta = json.loads((out.dir / "meta.json").read_text())
@@ -383,3 +383,24 @@ def test_results_report_the_three_numbers(synth, tmp_path):
     assert float(rows[2]["gain"]) == pytest.approx(unseen["gain"])
     saved = np.load(out.dir / "runs" / "0002.npz")
     assert "q_mean_probes" in saved and "curve_single_best_probes" in saved
+
+
+def test_each_split_gets_its_own_folder_and_a_split_seed_column(synth, tmp_path):
+    data, fit = synth
+    outs = [Results(dataclasses.replace(data, split_seed=s), "synthetic", root=tmp_path) for s in (0, 1, 2)]
+    assert len({o.dir for o in outs}) == 3 and [o.dir.name.split("_")[-1] for o in outs] == ["split0", "split1", "split2"]
+    outs[1].run("frozen", fit, n_boot=0)
+    assert list(csv.DictReader(open(outs[1].dir / "results.csv")))[0]["split_seed"] == "1"
+    assert json.loads((outs[1].dir / "meta.json").read_text())["split_seed"] == 1
+
+
+def test_probes_are_nested_across_budgets_seeded_and_independent_of_the_embedding(synth):
+    data, fit = synth
+    probes = lambda n, seed=0, f=fit: evaluate(data, f, new_model="model2", n_probes=n, seed=seed, n_boot=0)["probes"]
+    small, large = probes(5), probes(50)
+    assert list(large[:5]) == list(small)                      # nested: the 5 probes start the 50
+    assert list(probes(50)) == list(large)                     # same seed, same probes
+    assert list(probes(50, seed=1)) != list(large)             # another seed, other probes
+    other_embedding = lambda pool: (lambda queries: np.random.default_rng(3).normal(size=(len(queries), 4)))
+    assert list(probes(50, f=other_embedding)) == list(large)  # the probes do not depend on the embedding
+    assert len(set(large)) == 50 and np.isin(large, data.train).all()

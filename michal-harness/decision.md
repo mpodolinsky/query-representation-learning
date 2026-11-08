@@ -79,18 +79,19 @@ Cost of this setup at full scale (80k test queries, 33 models, 500 λ): about 5 
 - The setting is passed as plain arguments, not an object: `evaluate(fit, new_model=None, n_probes=None, seed=0)`.
   `new_model=None` is the seen-model setting. Otherwise it is the unseen setting with `n_probes` probes.
 - Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200), n_boot=1000, n_lambdas=500)`. It returns `gain`, `gain_same_probes` (unseen only), `gain_abs`, `gain_ci`, `A`, `A_single_best`, `k` (the one used), the λ grid, the three curves (router, single best, oracle), the test `Q_hat`, `q_mean` (full-information baseline), `q_mean_probes` (unseen only), the `probes` (query indices, None in the seen setting) and the `cost_range`. `n_boot=0` skips the bootstrap. `tune_k=True` ignores `k`.
-- Splits and probe sets come from Arman's output. **Stand-in:** probes are currently drawn by a seeded random sampler inside `evaluate`, to be replaced by his probe sets.
-- `Data` has a `train`, a `val` and a `test` index set. The validation split comes from Arman's output.
+- The splits come from Arman's output. **Probe sets are generated on our side (decided 2026-11-08), not by Arman:** the probes of a run are the first `n_probes` of a seeded permutation of the training queries (`seed` argument). So the probes for a smaller budget are contained in those for a larger one (same seed), which makes the curve against `n` smoother. They do not depend on the embedding, so every embedding gets the same probes, and they follow the split because they are drawn from `data.train`.
+  Reasons: it is a one-liner, and probe sets per split, release event, budget and seed would be over a thousand lists to keep in sync. A stratified-by-task-type sampler (using `Data.theme`) is a possible later addition, still on our side.
+- `Data` has a `train`, a `val` and a `test` index set, an optional `theme`, and a `split_seed`. The splits come from Arman's output.
 
 ## Results format **[team: all]** (implemented: `Results` in `router.py`)
 
-- Every experiment writes into its own folder `results/YYYY-MM-DD_HH-MM-SS/`. These folders are **gitignored** (`results/` in `.gitignore`), so outputs are kept locally for reuse and never committed.
+- Every experiment (one `Data`, i.e. one split) writes into its own folder `results/YYYY-MM-DD_HH-MM-SS_split<split_seed>/`. These folders are **gitignored** (`results/` in `.gitignore`), so outputs are kept locally for reuse and never committed.
 - Contents:
   - `results.csv`: one row per run (one per seed), columns
-    `run, benchmark, embedding, new_model, n_probes, seed, tune_k, k, n_lambdas, gain, gain_abs, gain_same_probes, recovery, gain_ci_low, gain_ci_high, A, A_single_best`.
+    `run, benchmark, embedding, new_model, n_probes, seed, split_seed, tune_k, k, n_lambdas, gain, gain_abs, gain_same_probes, recovery, gain_ci_low, gain_ci_high, A, A_single_best`.
     `new_model` and `n_probes` are empty for the seen setting, and the interval is empty if the bootstrap was skipped (`n_boot=0`).
   - `runs/NNNN.npz`: per run, the λ grid, the three cost-quality curves (router, single best, oracle), the test `q̂` (float64) and the mean qualities used by the single best.
-  - `split.npz`: the train/val/test indices. `meta.json`: creation time, benchmark, git commit (`-dirty` if uncommitted changes), model names and mean costs.
+  - `split.npz`: the train/val/test indices. `meta.json`: creation time, benchmark, split seed, git commit (`-dirty` if uncommitted changes), model names and mean costs.
 - Reuse: with `q̂`, the test scores and the costs, the routing, curves, area and gain can be recomputed (a test checks this reproduces the saved curves exactly) without refitting an embedding or rerunning the kNN. This matters because the area definition may be revisited in the sensitivity check.
 - `seed` covers the probe draw and, for learned embeddings, the training seed. The bootstrap interval is per row.
 - Report the mean gain over seeds, the spread across seeds, and the bootstrap interval, kept separate (a two-stage bootstrap is optional).
@@ -125,8 +126,12 @@ Cost of this setup at full scale (80k test queries, 33 models, 500 λ): about 5 
 
 - **The validation split is only for tuning `k` [team: Alexandros, Arman].** Embedding training must never see it, early stopping included. Alexandros carves his own early-stopping set out of the training split. Otherwise the embedding is selected on the queries we tune `k` on, and the tuning becomes optimistic for the learned embedding only. Arman provides the `val` split.
 
-- **The train/test split is FIXED.** We use one split (Arman's). The bootstrap interval only measures test-set sampling noise, and seeds only measure probe and training randomness.
-  Variation from re-splitting the data is **not** measured, so a small gain on this split may not hold on another. Add several splits if time allows.
+- **Splits (decided 2026-11-08): several split seeds, owned by Arman.** One split can mislead: a small gain on it may not hold on another. We ask Arman for a loader that takes a split seed (`load_data(benchmark, split_seed=0)` returning a `Data` with that seed's train/val/test indices and `Data.split_seed` set).
+  - About 3 split seeds. Splits are random at the query level (the paper leaves query shift out of scope), stratified by task type so every split has every task type, and **the same for every embedding**, so comparisons between embeddings are paired.
+  - One split (seed 0) is the main one for development and plots, the others are for the final runs. Each extra split multiplies the compute, especially for the learned embedding, which is retrained per split.
+  - Each split is its own `Data`, hence its own `Results` folder and a `split_seed` column in `results.csv`. `recovery` is computed within a split.
+  - **Three separate sources of spread, reported separately:** across splits, across probe and training seeds, and the bootstrap interval within a run (test-set sampling noise only).
+  - **Until several splits exist, the split is fixed** and re-splitting variance is not measured. Treat a small gain on one split with care.
 - **Held-out models are separate experiments,** not repeats. The 11 (LLMRouterBench) and 6 (RouterBench) release events are reported one by one. A mean across them is only a summary.
 
 ## Optional (decided 2026-11-08)

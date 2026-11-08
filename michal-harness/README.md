@@ -111,6 +111,7 @@ A stand-in until Arman's schema is fixed.
 | `cost` | `(n_models,)` **mean** per-query cost of each model at the evaluated epoch (not per-query cost) |
 | `train`, `val`, `test` | index arrays into `queries` |
 | `theme` | optional, task type of each query (used for plots) |
+| `split_seed` | which split this is (default 0), written to the results |
 
 ## Running experiments
 
@@ -139,6 +140,15 @@ for new_model in held_out_models:
 
 A learned embedding is retrained in every unseen run, so that loop is expensive for it. Use fewer seeds where training is slow.
 
+For several splits, repeat it per split (each `Data` has its own `split_seed`, and `Results` writes it to the table and the folder name):
+
+```python
+for split_seed in range(3):
+    data = load_data("llmrouterbench", split_seed=split_seed)    # from Arman's loader
+    out = Results(data, "llmrouterbench")
+    ...                                                         # the loop above
+```
+
 ## What comes back
 
 `evaluate` returns a dict:
@@ -159,10 +169,10 @@ How to report: the mean over seeds, the spread across seeds, and the bootstrap i
 
 ## Saved results
 
-`Results` writes a new folder `results/YYYY-MM-DD_HH-MM-SS/`, ignored by git:
+`Results` (one per `Data`, i.e. per split) writes a new folder `results/YYYY-MM-DD_HH-MM-SS_split<split_seed>/`, ignored by git:
 
 ```
-results.csv      one row per run: benchmark, embedding, new_model, n_probes, seed, tune_k, k, n_lambdas,
+results.csv      one row per run: benchmark, embedding, new_model, n_probes, seed, split_seed, tune_k, k, n_lambdas,
                  gain, gain_abs, gain_same_probes, recovery, gain_ci_low, gain_ci_high, A, A_single_best
 runs/NNNN.npz    per run: the λ grid, the cost-quality curves, the test q̂, mean qualities and the probes
 split.npz        the train, val and test indices
@@ -209,7 +219,7 @@ plots.plot_pca_groups(Z[data.test], ratio, picks, "Model chosen by the router",
 
 ## Things to keep in mind
 
-- **One fixed train/val/test split.** The bootstrap interval measures test-set noise and seeds measure probe and training randomness. Variation from re-splitting is not measured.
+- **One split is one sample.** The bootstrap interval measures test-set noise, seeds measure probe and training randomness, and only running several split seeds (each its own `Data`, with `split_seed` set) measures re-splitting variance. Report the three kinds of spread separately.
 - **Held-out models are separate experiments**, not repeats. Report each release event; a mean across them is only a summary.
 - **Compare gains only within one benchmark and release epoch.** The cost range depends on the model set.
 - **Routing ties go to the cheaper model**, so the order of `models` does not matter.
@@ -220,6 +230,7 @@ plots.plot_pca_groups(Z[data.test], ratio, picks, "Model chosen by the router",
 Done: the router, the metrics, the bootstrap interval, `k` tuning, saved results, the plots and the tests.
 
 Still stand-ins or open:
-- `Data` and the probe sampler (random draw inside `evaluate`) are stand-ins for Arman's schema and probe sets. An adapter will be written when his table exists. The mean cost per model comes from him.
+- `Data` is a stand-in for Arman's schema. An adapter will be written when his table exists. The mean cost per model and the splits come from him.
+- Probe sets are generated inside `evaluate` (a seeded permutation of the training queries, first `n_probes`), so a smaller budget's probes are contained in a larger one's and every embedding gets the same probes.
 - Probes-to-target and a sensitivity check on λ and `k` are optional and not implemented.
 - The `evaluate` interface and the results format still need sign-off from everyone.

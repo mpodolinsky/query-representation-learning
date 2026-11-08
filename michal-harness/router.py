@@ -17,10 +17,11 @@ class Data:
     models: list[str]
     S: np.ndarray       # (Q, M) observed scores in [0, 1]
     cost: np.ndarray    # (M,) mean per-query cost at the evaluated epoch
-    train: np.ndarray   # query indices. WARNING: one fixed split; re-splitting variance is not measured
+    train: np.ndarray   # query indices. One split per Data: run several split seeds to measure re-splitting variance
     val: np.ndarray     # used ONLY to tune k. Embedding training (early stopping included) must never see it
     test: np.ndarray
     theme: np.ndarray | None = None  # task type of each query (e.g. math, code), used for plots and RQ1a
+    split_seed: int = 0              # which split this is; written to the results
 
 
 def knn_indices(E_labeled, E_query, k):
@@ -110,7 +111,8 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
              n_boot=1000, n_lambdas=500):
     """Evaluate the embedding returned by `fit(train_models) -> embed(list[str]) -> ndarray`.
     new_model=None: seen-model setting. Otherwise `new_model` is held out of `fit` and of the
-    kNN labels, and only gets scores on `n_probes` probe queries (unseen-model setting).
+    kNN labels, and only gets scores on `n_probes` probe queries (unseen-model setting), drawn from the training
+    queries with `seed`; the probes of a smaller `n_probes` are contained in those of a larger one.
     `gain` is over the single best that knows every model's quality from all training queries, in both settings,
     so the baseline does not change with `n_probes`. In the unseen setting `gain_same_probes` is over the single
     best that knows the new model only from the same probes.
@@ -131,7 +133,9 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
     Q_hat[:, pool] = knn_estimate(E[tr], S_tr[:, pool], E[te], k)
     q_mean = S_tr.mean(0)  # mean train quality of every model, the new one included: the full-information single best
     if new is not None:
-        probes = np.random.default_rng(seed).choice(len(tr), n_probes, replace=False)  # TODO: Arman's sampler
+        # probes: the first n_probes of a seeded permutation of the training queries, so the probes of a smaller
+        # budget are contained in those of a larger one (same seed), and every embedding gets the same probes
+        probes = np.random.default_rng(seed).permutation(len(tr))[:n_probes]
         probe_ids = tr[probes]
         Q_hat[:, [new]] = knn_estimate(E[probe_ids], S_tr[probes][:, [new]], E[te], k)
         q_mean_probes = q_mean.copy()
@@ -167,19 +171,20 @@ def recovery(unseen, seen):
 
 
 class Results:
-    """Saves the runs of one experiment in a new folder `root/YYYY-MM-DD_HH-MM-SS/` (gitignored):
+    """Saves the runs of one experiment on one `Data` (one split) in a new folder
+    `root/YYYY-MM-DD_HH-MM-SS_split<split_seed>/` (gitignored), so several splits never collide:
     results.csv (one row per run), runs/NNNN.npz (curves, λ grid, test q̂, mean qualities and probe queries of the run),
     split.npz (train/val/test indices) and meta.json. Everything needed to redo the routing, the area and the
     gain later, without refitting an embedding or rerunning the kNN, is in there."""
 
     def __init__(self, data, benchmark, root="results"):
         self.data, self.benchmark, self.rows, self.seen = data, benchmark, [], {}  # seen: embedding name -> seen run
-        self.dir = Path(root) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.dir = Path(root) / f"{datetime.now():%Y-%m-%d_%H-%M-%S}_split{data.split_seed}"
         (self.dir / "runs").mkdir(parents=True)
         np.savez_compressed(self.dir / "split.npz", train=data.train, val=data.val, test=data.test)
         git = lambda *args: subprocess.run(["git", *args], capture_output=True, text=True).stdout.strip()
         (self.dir / "meta.json").write_text(json.dumps({
-            "created": datetime.now().isoformat(timespec="seconds"), "benchmark": benchmark,
+            "created": datetime.now().isoformat(timespec="seconds"), "benchmark": benchmark, "split_seed": data.split_seed,
             "git_commit": git("rev-parse", "--short", "HEAD") + ("-dirty" if git("status", "--porcelain") else ""),
             "models": data.models, "cost": data.cost.tolist()}, indent=2))
 
@@ -198,6 +203,7 @@ class Results:
         lo, hi = res["gain_ci"] or ("", "")
         self.rows.append({"run": run_id, "benchmark": self.benchmark, "embedding": embedding,
                           "new_model": new_model or "", "n_probes": n_probes or "", "seed": seed,
+                          "split_seed": self.data.split_seed,
                           "tune_k": eval_kwargs.get("tune_k", False), "k": res["k"], "n_lambdas": res["n_lambdas"],
                           "gain": res["gain"], "gain_abs": res["gain_abs"],
                           "gain_same_probes": "" if res["gain_same_probes"] is None else res["gain_same_probes"],
