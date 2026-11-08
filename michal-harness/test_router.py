@@ -292,10 +292,27 @@ def test_cost_quality_plots(synth):
     assert len(plots.plot_curves(unseen, "t").axes[0].lines) == 4              # plus the same-probes single best
 
 
+def _titles(fig):
+    return [ax.get_title() for ax in fig.axes if ax.get_visible()]
+
+
 def test_pca_group_panels_follow_the_groups_and_the_cap(projected):
     data, E, Z, ratio = projected
-    assert _visible(plots.plot_pca_groups(Z, ratio, data.theme, "t")) == len(np.unique(data.theme))
-    assert _visible(plots.plot_pca_groups(Z, ratio, data.theme, "t", max_groups=2)) == 2
+    fig = plots.plot_pca_groups(Z, ratio, data.theme, "t")
+    assert len(_titles(fig)) == len(np.unique(data.theme))
+    assert [t.split(" (")[0] for t in _titles(fig)] == [str(g) for g in np.unique(data.theme)]  # label order, not size
+    assert len(_titles(plots.plot_pca_groups(Z, ratio, data.theme, "t", max_groups=2))) == 2
+
+
+def test_pca_groups_can_show_every_group_in_the_given_order_including_empty_ones(projected):
+    data, E, Z, ratio = projected
+    picks = np.where(data.theme % 2 == 0, 1, 3)                    # only models 1 and 3 are ever "chosen"
+    names = dict(enumerate(data.models))
+    fig = plots.plot_pca_groups(Z, ratio, picks, "t", names=names, groups=range(len(data.models)))
+    titles = _titles(fig)
+    assert [t.split(" (")[0] for t in titles] == data.models        # original model order, all models
+    assert [t.split("n = ")[1] for t in titles] == ["0)", f"{(picks == 1).sum()})", "0)", f"{(picks == 3).sum()})", "0)"]
+    assert any(t.get_text() == "none" for t in fig.axes[0].texts)   # an empty panel says so
 
 
 def test_pca_quality_has_one_panel_per_model_and_a_colorbar(projected):

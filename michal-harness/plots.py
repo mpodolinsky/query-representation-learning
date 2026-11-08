@@ -114,19 +114,27 @@ def _pc_labels(ax, ratio):
     ax.grid(False)
 
 
-def plot_pca_groups(Z, ratio, labels, title, names=None, max_groups=8):
+def plot_pca_groups(Z, ratio, labels, title, names=None, groups=None, max_groups=8):
     """Small multiples, one panel per group (a task type, the model the router picks, ...): the group in blue over
-    all points in gray. Colors do not carry identity, the panel title does. Shows the `max_groups` largest groups."""
-    groups, counts = np.unique(labels, return_counts=True)
-    order = np.argsort(-counts)[:max_groups]
+    all points in gray. Colors do not carry identity, the panel title does.
+    `groups` lists the groups to show, in this order, empty ones included (e.g. all models in their original order,
+    also the ones never chosen). By default the groups present, in label order; with more than `max_groups` of
+    them, the largest ones."""
+    labels = np.asarray(labels)
+    present, counts = np.unique(labels, return_counts=True)
+    truncated = groups is None and len(present) > max_groups
+    if groups is None:
+        groups = np.sort(present[np.argsort(-counts, kind="stable")[:max_groups]])
     keep = _sample(len(Z))
-    fig, axes = _panels(len(order), ratio)
-    for ax, i in zip(axes, order):
+    fig, axes = _panels(len(groups), ratio)
+    for ax, g in zip(axes, groups):
+        mask = labels == g
         ax.scatter(*Z[keep].T, s=4, color=FAINT, linewidths=0, rasterized=True)
-        mask = (labels == groups[i])[keep]
-        ax.scatter(*Z[keep][mask].T, s=5, color=BLUE, linewidths=0, rasterized=True)
-        ax.set_title(f"{(names or {}).get(groups[i], groups[i])} (n = {counts[i]})", fontsize=9)
-    shown = f" (largest {max_groups} of {len(groups)})" if len(groups) > max_groups else ""
+        ax.scatter(*Z[keep][mask[keep]].T, s=5, color=BLUE, linewidths=0, rasterized=True)
+        ax.set_title(f"{(names or {}).get(g, g)} (n = {mask.sum()})", fontsize=9)
+        if not mask.any():
+            ax.text(0.5, 0.5, "none", transform=ax.transAxes, ha="center", va="center", color=MUTED)
+    shown = f" (largest {max_groups} of {len(present)}, in label order)" if truncated else ""
     fig.suptitle(title + shown, fontsize=11)
     return fig
 
