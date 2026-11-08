@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 
 import plots
 from router import (Data, Results, area, bootstrap_gain_ci, curve, evaluate, knn_estimate, knn_indices, realized,
-                    route, select_k)
+                    recovery, route, select_k)
 
 
 def make_data(Q=4000, M=5, C=6, dim=8, seed=0):
@@ -53,6 +53,15 @@ def test_knn_estimate_k1_returns_own_scores():
 def test_knn_estimate_caps_k_at_number_of_labels():
     E, S = np.array([[0.], [1.]]), np.array([[0.], [1.]])
     assert np.allclose(knn_estimate(E, S, np.array([[0.]]), k=10), [[0.5]])
+
+
+def test_route_ties_go_to_the_cheaper_model_whatever_the_model_order():
+    scores, cost = np.array([[0.5, 0.5, 0.2]]), np.array([2., 1., 0.5])
+    assert route(scores, cost, 0.0)[0] == 1                      # tie at λ = 0: the cheaper of the two best
+    perm = np.array([2, 0, 1])                                   # shuffle the models: the same model is chosen
+    assert cost[route(scores, cost, 0.0)[0]] == cost[perm][route(scores[:, perm], cost[perm], 0.0)[0]]
+    # 0.9 − 0.2·3 and 0.5 − 0.2·1 are equal up to float rounding (1e-16): still a tie, so the cheaper model 1 wins
+    assert route(np.array([[0.9, 0.5]]), np.array([3., 1.]), 0.2)[0] == 1
 
 
 def test_route_extremes():
@@ -106,7 +115,7 @@ def test_unseen_with_all_train_queries_as_probes_equals_seen(synth):
 
 def test_more_probes_help(synth):
     data, fit = synth
-    A = lambda n: np.mean([evaluate(data, fit, new_model="model2", n_probes=n, seed=s, n_boot=0)["A"] for s in range(5)])
+    A = lambda n: np.mean([evaluate(data, fit, new_model="model2", n_probes=n, seed=s, n_boot=0, n_lambdas=100)["A"] for s in range(5)])
     assert A(5) < A(500)
 
 
@@ -200,6 +209,7 @@ def test_results_csv_has_one_row_per_run(synth, tmp_path):
     assert [r["run"] for r in rows] == ["0000", "0001"]
     assert (rows[0]["new_model"], rows[0]["n_probes"], rows[0]["tune_k"]) == ("", "", "False")
     assert float(rows[0]["gain"]) == pytest.approx(seen["gain"]) and float(rows[0]["gain_ci_low"]) < seen["gain"]
+    assert float(rows[0]["gain_abs"]) == pytest.approx(seen["gain_abs"]) and rows[0]["n_lambdas"] == "500"
     assert (rows[1]["new_model"], rows[1]["n_probes"], rows[1]["seed"], rows[1]["tune_k"]) == ("model2", "50", "3", "True")
     assert int(rows[1]["k"]) == unseen["k"] and rows[1]["gain_ci_low"] == ""  # n_boot=0: no interval
 
@@ -275,7 +285,11 @@ def test_cost_quality_plots(synth):
     results = {k: evaluate(data, fit, k=k, n_boot=0) for k in (3, 10, 50)}
     assert len(plots.plot_curves(results[10], "t").axes[0].lines) == 3          # router, single best, oracle
     assert len(plots.plot_curves_by_k(results, 50, "t").axes[0].lines) == 5     # three k plus single best and oracle
-    assert len(plots.plot_gain_vs_probes([1, 10, 100], np.random.default_rng(0).random((3, 4)), 0.1).axes[0].lines) == 2
+    gains = np.random.default_rng(0).random((3, 4))
+    assert len(plots.plot_gain_vs_probes([1, 10, 100], gains, 0.1).axes[0].lines) == 2
+    assert len(plots.plot_gain_vs_probes([1, 10, 100], gains, 0.1, gains).axes[0].lines) == 3
+    unseen = evaluate(data, fit, new_model="model2", n_probes=20, n_boot=0)
+    assert len(plots.plot_curves(unseen, "t").axes[0].lines) == 4              # plus the same-probes single best
 
 
 def test_pca_group_panels_follow_the_groups_and_the_cap(projected):
@@ -308,3 +322,47 @@ def test_probe_and_neighbor_plots_label_what_they_show(projected):
     texts = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
     assert "query" in texts and "neighbors for the pool models (k = 10)" in texts
     assert "neighbors for the new model (k = 5)" in texts
+
+
+# ---------------------------------------------------------------- baselines and recovery in the unseen setting
+
+def test_unseen_baseline_is_the_full_information_single_best_whatever_the_probes(synth):
+    data, fit = synth
+    seen = evaluate(data, fit, n_boot=0)
+    for n, seed in [(2, 0), (50, 1), (400, 2)]:
+        unseen = evaluate(data, fit, new_model="model2", n_probes=n, seed=seed, n_boot=0)
+        assert unseen["A_single_best"] == pytest.approx(seen["A_single_best"])
+        assert np.allclose(unseen["curves"]["single_best"], seen["curves"]["single_best"])
+
+
+def test_same_probes_baseline_exists_only_in_the_unseen_setting_and_is_noisier(synth):
+    data, fit = synth
+    assert evaluate(data, fit, n_boot=0)["gain_same_probes"] is None
+    few = evaluate(data, fit, new_model="model2", n_probes=3, n_boot=0)
+    assert "single_best_probes" in few["curves"] and few["q_mean_probes"][2] != few["q_mean"][2]
+    all_train = evaluate(data, fit, new_model="model2", n_probes=len(data.train), n_boot=0)
+    assert all_train["gain_same_probes"] == pytest.approx(all_train["gain"])  # all labels known: same baseline
+
+
+def test_recovery_is_one_with_all_labels_and_nan_without_a_seen_gain(synth):
+    data, fit = synth
+    seen = evaluate(data, fit, n_boot=0)
+    unseen = evaluate(data, fit, new_model="model2", n_probes=len(data.train), n_boot=0)
+    assert recovery(unseen, seen) == pytest.approx(1)
+    assert recovery({"gain": 0.05}, {"gain": 0.10}) == pytest.approx(0.5)
+    assert np.isnan(recovery({"gain": 0.05}, {"gain": -0.01}))
+
+
+def test_results_report_the_three_numbers(synth, tmp_path):
+    data, fit = synth
+    out = Results(data, "synthetic", root=tmp_path)
+    out.run("frozen", fit, new_model="model2", n_probes=20, n_boot=0)            # no seen run yet: no recovery
+    seen = out.run("frozen", fit, n_boot=0)
+    unseen = out.run("frozen", fit, new_model="model2", n_probes=60, n_boot=0)
+    rows = list(csv.DictReader(open(out.dir / "results.csv")))
+    assert rows[0]["recovery"] == "" and rows[0]["gain_same_probes"] != ""
+    assert rows[1]["gain_same_probes"] == "" and rows[1]["recovery"] == ""        # the seen run itself
+    assert float(rows[2]["recovery"]) == pytest.approx(recovery(unseen, seen))
+    assert float(rows[2]["gain"]) == pytest.approx(unseen["gain"])
+    saved = np.load(out.dir / "runs" / "0002.npz")
+    assert "q_mean_probes" in saved and "curve_single_best_probes" in saved

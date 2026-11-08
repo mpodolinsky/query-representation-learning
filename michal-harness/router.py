@@ -37,8 +37,12 @@ def knn_estimate(E_labeled, S_labeled, E_query, k):
 
 
 def route(scores, cost, lam):
-    """Eq. 1: per query, the model maximizing score − λ·cost."""
-    return (scores - lam * cost).argmax(1)
+    """Eq. 1: per query, the model maximizing score − λ·cost. Ties (within 1e-9) go to the cheaper model, so the
+    result does not depend on the order of the models."""
+    objective = scores - lam * cost
+    cheapest_first = np.argsort(cost, kind="stable")
+    near_best = objective[:, cheapest_first] >= objective.max(1, keepdims=True) - 1e-9
+    return cheapest_first[near_best.argmax(1)]
 
 
 def realized(scores, S, cost, lambdas):
@@ -47,8 +51,8 @@ def realized(scores, S, cost, lambdas):
     return cost[picks], S[np.arange(len(S)), picks]
 
 
-def lambda_grid(cost, num=100):
-    """λ = 0 plus a log-spaced sweep scaled so that λ·(cost range) spans 1e-3 … 1e3."""
+def lambda_grid(cost, num=500):
+    """λ = 0 plus `num` log-spaced values, scaled so that λ·(cost range) spans 1e-3 … 1e3."""
     return np.r_[0, np.logspace(-3, 3, num)] / np.ptp(cost)
 
 
@@ -86,13 +90,13 @@ def bootstrap_gain_ci(router, single, c_range, n_boot=1000, level=0.95, seed=0):
     return tuple(np.quantile(areas["router"] / areas["single"] - 1, [(1 - level) / 2, (1 + level) / 2]))
 
 
-def select_k(E, data, pool, k_grid=(5, 10, 20, 50, 100, 200), n_boot=200, seed=0):
+def select_k(E, data, pool, k_grid=(5, 10, 20, 50, 100, 200), n_boot=200, seed=0, n_lambdas=500):
     """One-standard-error rule on the validation split: the largest k (smoothest estimate) whose router
     area is within one bootstrap standard error of the best k. Only the `pool` models are used."""
     tr, va, cost = data.train, data.val, data.cost[pool]
     c_range = (cost.min(), cost.max())
     runs = {k: realized(knn_estimate(E[tr], data.S[tr][:, pool], E[va], k), data.S[va][:, pool], cost,
-                        lambda_grid(cost)) for k in k_grid}
+                        lambda_grid(cost, n_lambdas)) for k in k_grid}
     areas = {k: area(curve(run), *c_range) for k, run in runs.items()}
     best = max(areas, key=areas.get)
     if len(k_grid) > 1 and best in (min(k_grid), max(k_grid)):
@@ -103,10 +107,13 @@ def select_k(E, data, pool, k_grid=(5, 10, 20, 50, 100, 200), n_boot=200, seed=0
 
 
 def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200),
-             n_boot=1000):
+             n_boot=1000, n_lambdas=500):
     """Evaluate the embedding returned by `fit(train_models) -> embed(list[str]) -> ndarray`.
     new_model=None: seen-model setting. Otherwise `new_model` is held out of `fit` and of the
     kNN labels, and only gets scores on `n_probes` probe queries (unseen-model setting).
+    `gain` is over the single best that knows every model's quality from all training queries, in both settings,
+    so the baseline does not change with `n_probes`. In the unseen setting `gain_same_probes` is over the single
+    best that knows the new model only from the same probes.
     tune_k=True ignores `k` and picks it from `k_grid` for this embedding (see `select_k`); the new model's
     labels are never used for that. `gain_ci` is a bootstrap interval over the test queries (None if n_boot=0)."""
     assert (new_model is None) == (n_probes is None), "new_model and n_probes go together"
@@ -116,33 +123,47 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
 
     E = np.asarray(fit([data.models[m] for m in pool])(data.queries))
     if tune_k:
-        k = select_k(E, data, pool, k_grid)  # independent of the probe seed: tuning never touches the probes
+        k = select_k(E, data, pool, k_grid, n_lambdas=n_lambdas)  # independent of the probe seed: tuning never touches the probes
     tr, te = data.train, data.test
     S_tr, S_te = data.S[tr], data.S[te]
 
-    Q_hat, q_mean, probe_ids = np.empty((len(te), M)), np.empty(M), None  # kNN estimates, mean train quality
+    Q_hat, probe_ids, q_mean_probes = np.empty((len(te), M)), None, None  # kNN estimates
     Q_hat[:, pool] = knn_estimate(E[tr], S_tr[:, pool], E[te], k)
-    q_mean[pool] = S_tr[:, pool].mean(0)
+    q_mean = S_tr.mean(0)  # mean train quality of every model, the new one included: the full-information single best
     if new is not None:
         probes = np.random.default_rng(seed).choice(len(tr), n_probes, replace=False)  # TODO: Arman's sampler
         probe_ids = tr[probes]
         Q_hat[:, [new]] = knn_estimate(E[probe_ids], S_tr[probes][:, [new]], E[te], k)
-        q_mean[new] = S_tr[probes, new].mean()
+        q_mean_probes = q_mean.copy()
+        q_mean_probes[new] = S_tr[probes, new].mean()  # what the single best knows from the same probes
 
-    lambdas = lambda_grid(data.cost)
+    lambdas = lambda_grid(data.cost, n_lambdas)
     policies = {"router": Q_hat, "single_best": np.broadcast_to(q_mean, Q_hat.shape), "oracle": S_te}
+    if q_mean_probes is not None:
+        policies["single_best_probes"] = np.broadcast_to(q_mean_probes, Q_hat.shape)
     runs = {name: realized(scores, S_te, data.cost, lambdas) for name, scores in policies.items()}
     curves = {name: curve(run) for name, run in runs.items()}
     c_range = (data.cost.min(), data.cost.max())
     areas = {name: area(c, *c_range) for name, c in curves.items()}
     ci = bootstrap_gain_ci(runs["router"], runs["single_best"], c_range, n_boot, seed=seed) if n_boot else None
-    return {"gain": areas["router"] / areas["single_best"] - 1,  # main metric: area gain over the single best
+    gain_same_probes = areas["router"] / areas["single_best_probes"] - 1 if q_mean_probes is not None else None
+    return {"gain": areas["router"] / areas["single_best"] - 1,  # main metric: area gain over the full-information single best
+            "gain_same_probes": gain_same_probes,                # unseen only: over the single best given the same probes
+            "gain_abs": (areas["router"] - areas["single_best"]) / np.log(c_range[1] / c_range[0]),  # in mean score
             "gain_ci": ci,                                       # 95% bootstrap interval over test queries
             "A": areas["router"] / areas["oracle"],              # secondary: area relative to the oracle
             "A_single_best": areas["single_best"] / areas["oracle"],
-            "k": k, "lambdas": lambdas, "curves": curves, "Q_hat": Q_hat, "q_mean": q_mean,
+            "k": k, "n_lambdas": n_lambdas, "lambdas": lambdas, "curves": curves, "Q_hat": Q_hat, "q_mean": q_mean,
+            "q_mean_probes": q_mean_probes,
             "probes": probe_ids,  # query indices of the probes (None in the seen setting)
             "cost_range": c_range}  # the range `A` is integrated over
+
+
+def recovery(unseen, seen):
+    """Fraction of the seen-model gain that an unseen run recovers with its probes. Both gains are over the same
+    full-information single best, so this is (area_unseen − area_base) / (area_seen − area_base).
+    NaN if the seen-model gain is not positive."""
+    return unseen["gain"] / seen["gain"] if seen["gain"] > 0 else float("nan")
 
 
 class Results:
@@ -152,7 +173,7 @@ class Results:
     gain later, without refitting an embedding or rerunning the kNN, is in there."""
 
     def __init__(self, data, benchmark, root="results"):
-        self.data, self.benchmark, self.rows = data, benchmark, []
+        self.data, self.benchmark, self.rows, self.seen = data, benchmark, [], {}  # seen: embedding name -> seen run
         self.dir = Path(root) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         (self.dir / "runs").mkdir(parents=True)
         np.savez_compressed(self.dir / "split.npz", train=data.train, val=data.val, test=data.test)
@@ -164,17 +185,23 @@ class Results:
 
     def run(self, embedding, fit, new_model=None, n_probes=None, seed=0, **eval_kwargs):
         """Evaluate `fit` with `evaluate`, save the run, and return the `evaluate` result.
-        `embedding` is the name written in the results table. q̂ is stored in float64 on purpose: routing ties
-        (equal q̂ − λ·cost) go to the first model, and float32 rounding would break them differently."""
+        `embedding` is the name written in the results table. Run the seen-model setting first: an unseen run of
+        the same embedding name then gets its `recovery` against it. q̂ is stored in float64 on purpose: float32
+        rounding (about 1e-7) is larger than the 1e-9 tolerance that decides routing ties."""
         res = evaluate(self.data, fit, new_model, n_probes, seed, **eval_kwargs)
         run_id = f"{len(self.rows):04d}"
+        unseen = {} if res["probes"] is None else {"probes": res["probes"], "q_mean_probes": res["q_mean_probes"]}
         np.savez_compressed(self.dir / "runs" / f"{run_id}.npz", lambdas=res["lambdas"], q_mean=res["q_mean"],
-                            Q_hat=res["Q_hat"], **({} if res["probes"] is None else {"probes": res["probes"]}),
-                            **{f"curve_{name}": c for name, c in res["curves"].items()})
+                            Q_hat=res["Q_hat"], **unseen, **{f"curve_{name}": c for name, c in res["curves"].items()})
+        if new_model is None:
+            self.seen[embedding] = res
         lo, hi = res["gain_ci"] or ("", "")
         self.rows.append({"run": run_id, "benchmark": self.benchmark, "embedding": embedding,
                           "new_model": new_model or "", "n_probes": n_probes or "", "seed": seed,
-                          "tune_k": eval_kwargs.get("tune_k", False), "k": res["k"], "gain": res["gain"],
+                          "tune_k": eval_kwargs.get("tune_k", False), "k": res["k"], "n_lambdas": res["n_lambdas"],
+                          "gain": res["gain"], "gain_abs": res["gain_abs"],
+                          "gain_same_probes": "" if res["gain_same_probes"] is None else res["gain_same_probes"],
+                          "recovery": recovery(res, self.seen[embedding]) if new_model and embedding in self.seen else "",
                           "gain_ci_low": lo, "gain_ci_high": hi, "A": res["A"], "A_single_best": res["A_single_best"]})
         with open(self.dir / "results.csv", "w", newline="") as f:  # rewritten each run: partial results survive a crash
             writer = csv.DictWriter(f, fieldnames=self.rows[0])

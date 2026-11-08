@@ -2,11 +2,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.ticker import PercentFormatter
+from matplotlib.ticker import MaxNLocator, PercentFormatter
 from sklearn.decomposition import PCA
 
 # categorical slots 1-3 (a scatter keeps to three colors), an ordinal ramp for k, a sequential ramp, neutral inks
-SERIES = {"router": "#2a78d6", "single_best": "#eb6834", "oracle": "#1baf7a"}
+SERIES = {"router": "#2a78d6", "single_best": "#eb6834", "single_best_probes": "#eb6834", "oracle": "#1baf7a"}
 BLUE, ORANGE = SERIES["router"], SERIES["single_best"]
 BLUES = ["#86b6ef", "#3987e5", "#1c5cab", "#0d366b"]  # light to dark, for up to 4 values of k
 SEQ = LinearSegmentedColormap.from_list("seq_blue", ["#cde2fb", "#3987e5", "#0d366b"])
@@ -37,9 +37,10 @@ def plot_curves(res, title):
     """Cost-quality curves of the router, the single best and the oracle returned by `evaluate`."""
     fig, ax = _curve_axes(res, title)
     for name, c in res["curves"].items():
-        label = name.replace("_", " ")
-        ax.plot(c[:, 0], c[:, 1], color=SERIES[name], label=label)
-        _label_end(ax, c, label, below=name == "single_best")
+        label = "single best, same probes" if name == "single_best_probes" else name.replace("_", " ")
+        ax.plot(c[:, 0], c[:, 1], color=SERIES[name], label=label, linestyle="--" if name == "single_best_probes" else "-")
+        if name != "single_best_probes":
+            _label_end(ax, c, label, below=name == "single_best")
     ax.legend(frameon=False, loc="lower right")
     return fig
 
@@ -61,14 +62,20 @@ def plot_curves_by_k(results, selected, title):
     return fig
 
 
-def plot_gain_vs_probes(n_grid, gains, seen_gain, title="Unseen-model gain against probe budget"):
-    """`gains` has shape (len(n_grid), n_seeds): the mean over seeds as a line, min to max as a band."""
+def plot_gain_vs_probes(n_grid, gains, seen_gain, gains_same_probes=None, title="Unseen-model gain against probe budget"):
+    """`gains` has shape (len(n_grid), n_seeds), the gain over the full-information single best: the mean over seeds
+    as a line, min to max as a band. `gains_same_probes` (same shape) optionally adds the gain over the single best
+    that only knows the new model from the same probes, as a dashed line."""
     gains = np.asarray(gains)
     fig, ax = plt.subplots()
-    ax.plot(n_grid, gains.mean(1), color=BLUE, label="unseen model, n probes")
+    ax.plot(n_grid, gains.mean(1), color=BLUE, label="over the full-information single best")
     ax.fill_between(n_grid, gains.min(1), gains.max(1), color=BLUE, alpha=0.15, linewidth=0)
+    if gains_same_probes is not None:
+        ax.plot(n_grid, np.asarray(gains_same_probes).mean(1), color=ORANGE, linestyle="--", linewidth=1.6,
+                label="over the single best with the same probes")
     ax.axhline(seen_gain, color=MUTED, linewidth=1, label="seen-model gain (tuned k)")
     ax.set(xscale="log", xlabel="number of probes n", ylabel="gain over single best", title=title)
+    ax.yaxis.set_major_locator(MaxNLocator(steps=[1, 2, 5, 10]))  # ticks at whole percents: 2%, 4%, ... or 5%, 10%
     ax.yaxis.set_major_formatter(PercentFormatter(1, decimals=0))
     ax.legend(frameon=False, loc="lower right")
     return fig
