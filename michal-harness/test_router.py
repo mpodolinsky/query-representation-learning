@@ -1,7 +1,9 @@
+import dataclasses
+
 import numpy as np
 import pytest
 
-from router import Data, area, evaluate, knn_estimate, route
+from router import Data, area, bootstrap_gain_ci, evaluate, knn_estimate, route, select_k
 
 
 def make_data(Q=4000, M=5, C=6, dim=8, seed=0):
@@ -14,8 +16,9 @@ def make_data(Q=4000, M=5, C=6, dim=8, seed=0):
     quality = np.clip(np.linspace(0.3, 0.7, M)[:, None] + rng.uniform(-0.25, 0.25, (M, C)), 0, 1)
     S = (rng.random((Q, M)) < quality[:, cluster].T).astype(float)
     order = rng.permutation(Q)
+    a, b = int(0.6 * Q), int(0.7 * Q)  # 60% train, 10% validation, 30% test
     data = Data([str(i) for i in range(Q)], [f"model{m}" for m in range(M)], S, cost,
-                train=order[: int(0.7 * Q)], test=order[int(0.7 * Q):])
+                train=order[:a], val=order[a:b], test=order[b:])
     fit = lambda _pool: lambda queries: E[[int(q) for q in queries]]  # frozen: ignores the pool
     return data, fit
 
@@ -82,17 +85,87 @@ def test_oracle_maximizes_the_lambda_objective(synth):
 def test_fit_receives_pool_without_new_model(synth):
     data, fit = synth
     calls = []
-    evaluate(data, lambda pool: calls.append(pool) or fit(pool), new_model="model2", n_probes=20)
+    evaluate(data, lambda pool: calls.append(pool) or fit(pool), new_model="model2", n_probes=20, n_boot=0)
     assert calls == [[m for m in data.models if m != "model2"]]
 
 
 def test_unseen_with_all_train_queries_as_probes_equals_seen(synth):
     data, fit = synth
-    unseen = evaluate(data, fit, new_model="model2", n_probes=len(data.train))
-    assert unseen["A"] == pytest.approx(evaluate(data, fit)["A"])
+    unseen = evaluate(data, fit, new_model="model2", n_probes=len(data.train), n_boot=0)
+    assert unseen["A"] == pytest.approx(evaluate(data, fit, n_boot=0)["A"])
 
 
 def test_more_probes_help(synth):
     data, fit = synth
-    A = lambda n: np.mean([evaluate(data, fit, new_model="model2", n_probes=n, seed=s)["A"] for s in range(5)])
+    A = lambda n: np.mean([evaluate(data, fit, new_model="model2", n_probes=n, seed=s, n_boot=0)["A"] for s in range(5)])
     assert A(5) < A(500)
+
+
+def _realized(quality):
+    """Fake `realized` output: 3 λ values routing every query to models of cost 1, 2, 4 with the given qualities."""
+    return np.tile([[1.], [2.], [4.]], (1, len(quality))), np.tile(quality, (3, 1))
+
+
+def test_bootstrap_of_identical_policies_is_zero():
+    rng = np.random.default_rng(0)
+    r = _realized(rng.random(300))
+    assert bootstrap_gain_ci(r, r, (1, 4), n_boot=50) == (0.0, 0.0)
+
+
+def test_bootstrap_interval_excludes_zero_for_a_dominating_router():
+    rng = np.random.default_rng(0)
+    q = rng.random(300) * 0.5
+    lo, hi = bootstrap_gain_ci(_realized(q + 0.3), _realized(q), (1, 4), n_boot=200)
+    assert 0 < lo <= hi
+
+
+def test_bootstrap_is_reproducible_and_seed_dependent():
+    rng = np.random.default_rng(0)
+    r, s = _realized(rng.random(300) * 0.6 + 0.1), _realized(rng.random(300) * 0.6)
+    a = bootstrap_gain_ci(r, s, (1, 4), n_boot=100, seed=1)
+    assert a == bootstrap_gain_ci(r, s, (1, 4), n_boot=100, seed=1)
+    assert a != bootstrap_gain_ci(r, s, (1, 4), n_boot=100, seed=2)
+
+
+def test_evaluate_interval_brackets_the_gain(synth):
+    res = evaluate(*synth)
+    lo, hi = res["gain_ci"]
+    assert lo < res["gain"] < hi
+    assert evaluate(*synth, n_boot=0)["gain_ci"] is None
+
+
+def test_tuned_k_is_in_the_grid_and_is_reported(synth):
+    res = evaluate(*synth, tune_k=True, k_grid=(3, 7, 15), n_boot=0)
+    assert res["k"] in (3, 7, 15)
+
+
+def test_select_k_takes_the_largest_k_when_all_are_equally_good(synth):
+    data, fit = synth
+    flat = dataclasses.replace(data, S=np.tile(np.linspace(0.2, 0.8, len(data.models)), (len(data.queries), 1)))
+    E = fit(None)(data.queries)
+    assert select_k(E, flat, list(range(len(data.models))), k_grid=(3, 7, 15)) == 15  # estimates identical for all k
+
+
+def test_select_k_never_reads_test_scores(synth):
+    data, fit = synth
+    S = data.S.copy()
+    S[data.test] = np.random.default_rng(1).random((len(data.test), S.shape[1]))
+    E, pool = fit(None)(data.queries), list(range(len(data.models)))
+    assert select_k(E, dataclasses.replace(data, S=S), pool) == select_k(E, data, pool)
+
+
+def test_select_k_warns_when_best_k_is_at_the_grid_edge(synth, capsys):
+    data, fit = synth
+    E, pool = fit(None)(data.queries), list(range(len(data.models)))
+    select_k(E, data, pool, k_grid=(3, 10, 30))        # area still rising at the top of the grid
+    assert "upper edge" in capsys.readouterr().out
+    select_k(E, data, pool, k_grid=(300, 1000, 2000))  # best is the smallest k
+    assert "lower edge" in capsys.readouterr().out
+
+
+def test_select_k_is_quiet_when_best_k_is_interior_or_grid_has_one_value(synth, capsys):
+    data, fit = synth
+    E, pool = fit(None)(data.queries), list(range(len(data.models)))
+    select_k(E, data, pool, k_grid=(3, 10, 100, 300, 1000))
+    select_k(E, data, pool, k_grid=(10,))
+    assert capsys.readouterr().out == ""

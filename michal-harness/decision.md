@@ -25,7 +25,13 @@ Items marked **[team]** affect other components and need sign-off from the owner
   - Each embedding owns its scaling. Sentence embeddings are L2-normalized inside the embedding, where Euclidean and cosine give the same neighbor ranking.
   - Rejected: cosine (discards scale), Mahalanobis (noisy covariance estimate in high dimensions, more code).
 - Few labels: a model with fewer than `k` labels (`n_probes` < k) uses `min(k, n_probes)` neighbors.
-- `k` is tuned on a validation split, possibly separately for seen and unseen settings.
+- **`k` tuning (implemented, `evaluate(..., tune_k=True)`):**
+  - Tuned **per embedding**, on the validation split only, so each embedding is compared at its own best `k` with the same procedure. The objective an embedding was trained with changes its geometry and therefore its best `k`.
+  - Metric: the router's area on the validation queries, over the pool models. Grid `(5, 10, 20, 50, 100, 200)`.
+  - **One-standard-error rule:** pick the largest `k` (the smoothest estimate) whose area is within one bootstrap standard error (200 resamples of the validation queries) of the best `k`.
+  - Seen pool only. In the unseen setting `k` is tuned on the pool without `m'`, with the embedding retrained without `m'`, and `m'`'s labels are never used (they are what the probe budget limits).
+  - Not k-fold cross-validation: a learned embedding has seen its training queries, so tuning on them would be optimistic, and refitting it per fold is too expensive.
+  - Grid-edge warning: if the best `k` (the argmax, before the 1-SE rule) is the smallest or largest value of the grid, `select_k` prints a warning, because the grid may be too narrow. Extend the grid and rerun.
 
 ## Cost **[team: Arman]**
 
@@ -58,9 +64,9 @@ Items marked **[team]** affect other components and need sign-off from the owner
   `evaluate` calls `fit` once per run with the pool minus the held-out model.
 - The setting is passed as plain arguments, not an object: `evaluate(fit, new_model=None, n_probes=None, seed=0)`.
   `new_model=None` is the seen-model setting. Otherwise it is the unseen setting with `n_probes` probes.
-- Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10)`. It returns `gain`, `A`, `A_single_best`, the λ grid and the three curves (router, single best, oracle).
+- Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200), n_boot=1000)`. It returns `gain`, `gain_ci`, `A`, `A_single_best`, `k` (the one used), the λ grid and the three curves (router, single best, oracle). `n_boot=0` skips the bootstrap. `tune_k=True` ignores `k`.
 - Splits and probe sets come from Arman's output. **Stand-in:** probes are currently drawn by a seeded random sampler inside `evaluate`, to be replaced by his probe sets.
-- Not implemented yet: validation split for tuning `k` (phase 3).
+- `Data` has a `train`, a `val` and a `test` index set. The validation split comes from Arman's output.
 
 ## Results format **[team: all]**
 
@@ -76,14 +82,18 @@ Items marked **[team]** affect other components and need sign-off from the owner
   - Reason: the oracle sees the realized (noisy) outcomes, so it is not attainable. The single best is the bar to beat. Beating it means the embedding captures what each model is good at, beyond the global price-quality trade-off.
   - No "true q" ceiling in the synthetic example, since real data has none.
   - **Gain formula (decided):** `gain = area_router / area_single_best − 1`, a direct comparison with the single best that does not involve the oracle. Reported as a relative area gain, with `A` in parentheses, for example "+2.1% (A = 0.611 vs 0.598)".
-  - **Uncertainty:** a bootstrap confidence interval over the test queries is planned (not implemented yet).
+  - **Uncertainty (implemented):** `gain_ci` is a paired percentile bootstrap interval over the test queries. 1000 resamples with replacement, the same resample for the router and the single best, 95% level, seeded by `seed`.
+    The router is not retrained or re-run: each query's routed model and score are fixed, and only the averages are recomputed.
+    Checked once on synthetic data (25 independent test sets): bootstrap standard error 1.98% against a real spread of 1.91%, and 92% of the 95% intervals contained the large-sample gain.
   - **TODO: probes-to-target.** Postponed. 90% of the seen-model `A` is already reached with 2 probes on the synthetic data, so the paper's definition is uninformative as written and needs redefining, probably on the gain.
-    To decide with it: the single-best baseline in the unseen setting (currently estimated from the same `n` probes, which makes the unseen gain larger than the seen gain at small `n`).
+    To decide with it: the single-best baseline in the unseen setting (currently estimated from the same `n` probes, which can distort the unseen gain at small `n`: with `k=10` it made the unseen gain larger than the seen gain, with a tuned `k` the curve is mostly noise across probe draws).
 - Seen-model `A` (RQ1) and `A_unseen(n)` (RQ2).
 - Probes-to-target (paper): smallest `n` with `A_unseen(n) ≥ 0.9 · A_seen`. **TODO**, see above; not implemented.
 - Task-type recovery ratio `A_task / A_learned` is computed by Nikhilesh using our `evaluate`.
 
 ## Warnings
+
+- **The validation split is only for tuning `k` [team: Alexandros, Arman].** Embedding training must never see it, early stopping included. Alexandros carves his own early-stopping set out of the training split. Otherwise the embedding is selected on the queries we tune `k` on, and the tuning becomes optimistic for the learned embedding only. Arman provides the `val` split.
 
 - **The train/test split is FIXED.** We use one split (Arman's). The bootstrap interval only measures test-set sampling noise, and seeds only measure probe and training randomness.
   Variation from re-splitting the data is **not** measured, so a small gain on this split may not hold on another. Add several splits if time allows.
