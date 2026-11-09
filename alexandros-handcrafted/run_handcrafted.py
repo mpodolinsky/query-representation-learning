@@ -31,7 +31,8 @@ sys.path.insert(0, str(REPO / "michal-harness"))
 sys.path.insert(0, str(HERE))
 
 from router import Results  # noqa: E402
-from handcrafted import VARIANTS  # noqa: E402
+from handcrafted import DEFAULT_LEVEL_COLUMNS, DEFAULT_VARIANTS, VARIANTS, MissingLevels, level_labels  # noqa: E402
+import task_taxonomy  # noqa: E402
 
 # Where Arman's loader may live, tried in order: "module:function". A path to a .py file also works.
 DEFAULT_LOADERS = ("data:load_data", "arman_data:load_data", "arman-data/data.py:load_data",
@@ -69,6 +70,42 @@ def find_load_data(spec: str | None = None):
     raise SystemExit("Arman's data loader was not found. Tried:\n  " + "\n  ".join(tried) +
                      "\nPoint to it with --loader module:function (or path/to/file.py:function), or set $QRL_LOADER. "
                      "It must provide load_data(benchmark, split_seed=0) -> router.Data (see README.md, 'Open assumptions').")
+
+
+# ---------------------------------------------------------------- finer task-type labels from a file
+
+def load_level_labels(path, data, level_columns=DEFAULT_LEVEL_COLUMNS) -> dict:
+    """{level: labels aligned with data.queries} from a CSV written by the offline classification step.
+    The CSV has a `query` column (the query text) or an `index` column (position in data.queries) and any of the
+    level columns (task_level1, task_level2, task_level3 by default). Queries without a row get 'unlabeled'."""
+    import csv
+    rows = list(csv.DictReader(open(path, newline="", encoding="utf-8")))
+    if not rows:
+        raise SystemExit(f"{path}: empty labels file")
+    by_text = "query" in rows[0]
+    if not by_text and "index" not in rows[0]:
+        raise SystemExit(f"{path}: needs a `query` or an `index` column; found {list(rows[0])}")
+    present = {lvl: col for lvl, col in level_columns.items() if col in rows[0]}
+    if not present:
+        raise SystemExit(f"{path}: none of the level columns {list(level_columns.values())} found; columns are {list(rows[0])}")
+    pos = {q: i for i, q in enumerate(data.queries)} if by_text else None
+    out = {lvl: np.full(len(data.queries), "unlabeled", dtype=object) for lvl in present}
+    unmatched = 0
+    for r in rows:
+        i = pos.get(r["query"]) if by_text else int(r["index"])
+        if i is None or not (0 <= i < len(data.queries)):
+            unmatched += 1
+            continue
+        for lvl, col in present.items():
+            if r[col] not in ("", None):
+                out[lvl][i] = r[col]
+    for lvl, labs in out.items():
+        n_missing = int((labs == "unlabeled").sum())
+        if n_missing:
+            print(f"WARNING: level {lvl}: {n_missing} of {len(labs)} queries have no label in {path} ('unlabeled')")
+    if unmatched:
+        print(f"WARNING: {unmatched} rows of {path} match no query in the data")
+    return out
 
 
 # ---------------------------------------------------------------- release timeline
@@ -129,12 +166,42 @@ def plan_runs(args, data):
             yield t, data_at_epoch(data, full, t), m
 
 
-def run_split(args, benchmark, data, log):
+def build_fits(args, data, log):
+    """One frozen `fit` per variant, built once per split. Variants whose task-type levels have no labels are skipped."""
     kw = dict(onehot_weight=args.onehot_weight if args.onehot_weight == "balanced" else float(args.onehot_weight),
-              tokenizer=args.tokenizer)
-    fits = {name: VARIANTS[name](data, **kw) for name in args.variants}  # frozen: built once per split
-    for name, fit in fits.items():
-        log(f"  {name}: {fit(None).describe()}")
+              tokenizer=args.tokenizer, level_weights=dict(zip((1, 2, 3), args.level_weights)))
+    if args.level_labels:
+        kw["labels"] = load_level_labels(args.level_labels, data)
+    fits = {}
+    for name in args.variants:
+        try:
+            fits[name] = VARIANTS[name](data, **kw)
+        except MissingLevels as e:
+            log(f"  {name}: skipped ({e})")
+            continue
+        log(f"  {name}: {fits[name](None).describe()}")
+    return fits
+
+
+def describe_levels(args, data, log):
+    """What each task-type level would be built from, and the taxonomy coverage of the raw labels (for --dry-run)."""
+    labels = load_level_labels(args.level_labels, data) if args.level_labels else None
+    for level in (0, 1, 2, 3):
+        labs = level_labels(data, level, labels, warn=False)
+        src = "missing" if labs is None else f"{len(set(labs.tolist()))} categories"
+        if labs is not None and level == 1 and not (labels and labels.get(1) is not None) and getattr(data, "task_level1", None) is None:
+            src += " (taxonomy applied to the raw label)"
+        log(f"  level {level}: {src}")
+    raw = getattr(data, "theme", None)
+    if raw is not None:
+        log("  taxonomy coverage of the raw labels:\n    " + task_taxonomy.report(raw).replace("\n", "\n    "))
+
+
+def run_split(args, benchmark, data, log):
+    fits = build_fits(args, data, log)
+    if not fits:
+        log("  no variant could be built on this split; skipping")
+        return
     common = dict(tune_k=True, k_grid=tuple(args.k_grid), n_lambdas=args.n_lambdas)
 
     if args.timeline == "full-pool":
@@ -181,7 +248,12 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--benchmarks", nargs="+", default=["llmrouterbench", "routerbench"])
     p.add_argument("--split-seeds", nargs="+", type=int, default=[0, 1, 2])
-    p.add_argument("--variants", nargs="+", default=list(VARIANTS), choices=list(VARIANTS))
+    p.add_argument("--variants", nargs="+", default=DEFAULT_VARIANTS, choices=list(VARIANTS),
+                   help="variants whose task-type levels have no labels in the data are skipped")
+    p.add_argument("--level-labels", default=None,
+                   help="CSV with finer task-type labels from the offline classifier (query|index + task_level2, task_level3)")
+    p.add_argument("--level-weights", nargs=3, type=float, default=[1.0, 1.0, 1.0], metavar=("W1", "W2", "W3"),
+                   help="relative weights of levels 1, 2, 3 inside the task-type block")
     p.add_argument("--n-grid", nargs="+", type=int, default=[1, 2, 5, 10, 20, 50, 100, 500], help="probe budgets")
     p.add_argument("--probe-seeds", type=int, default=5, help="probe draws per budget (seeds 0..n-1)")
     p.add_argument("--timeline", choices=["full-pool", "replay"], default="full-pool",
@@ -198,7 +270,8 @@ def parse_args(argv=None):
     p.add_argument("--onehot-weight", default="balanced", help="'balanced' or a float: weight of the one-hot block")
     p.add_argument("--tokenizer", default="tiktoken:cl100k_base", help="tiktoken:<enc> | hf:<name> | whitespace")
     p.add_argument("--loader", default=None, help="module:function or path.py:function giving load_data")
-    p.add_argument("--dry-run", action="store_true", help="load the data, print the plan and the run counts, run nothing")
+    p.add_argument("--dry-run", action="store_true",
+                   help="load the data, print the plan, the run counts, the task-type levels and the taxonomy coverage; run nothing")
     return p.parse_args(argv)
 
 
@@ -218,6 +291,7 @@ def main(argv=None):
                 f"theme={'yes' if getattr(data, 'theme', None) is not None else 'MISSING'}; "
                 f"release order: {release_order(data)}; {seen} seen + {unseen} unseen runs")
             if args.dry_run:
+                describe_levels(args, data, log)
                 continue
             run_split(args, benchmark, data, log)
 

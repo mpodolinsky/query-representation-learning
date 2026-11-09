@@ -9,10 +9,13 @@ Produces
   unseen_table.csv            per embedding, held-out model and n: gain, gain_same_probes, recovery, A (mean over probe
                               seeds, then mean ± std over splits)
   A_unseen_curves.csv         A_unseen(n) per embedding: mean over held-out models and splits (a summary; events differ)
-  rq1a_ratio.csv              A(task_type) / A(other embedding) per split, incl. the learned embedding when its rows exist
+  rq1a_ratio.csv              A(task_type_<levels>) / A(other embedding) per split, for every task-type-only variant
+                              (per level combination), incl. the learned embedding when its rows exist
   probes_to_target.csv        smallest n with A_unseen(n) >= target * A_seen (paper) and with recovery >= target
   figures/                    cost-quality curves (plots.plot_curves), gain vs probes (plots.plot_gain_vs_probes),
                               A_unseen(n) per embedding, and PCA views with --pca
+  diagnostics (--diagnostics) correlation matrix of the statistics block on the training split (CSV + heatmap), the
+                              strongly correlated pairs, its explained variance against the PCA-whitened block
 Spread convention (from the harness README): across splits (reported here as ± std over split seeds), across probe
 seeds (std_seeds columns) and the bootstrap interval (gain_ci_* columns, per run) are kept separate."""
 from __future__ import annotations
@@ -111,20 +114,22 @@ def unseen_tables(df: pd.DataFrame):
     return table, curves
 
 
-def rq1a_ratio(df: pd.DataFrame, task_name="task_type", learned_name="learned") -> pd.DataFrame:
-    """A(task type only) / A(other) per benchmark, epoch and split, then mean ± std over splits.
+def rq1a_ratio(df: pd.DataFrame, task_prefix="task_type", learned_name="learned") -> pd.DataFrame:
+    """A(task-type-only variant) / A(other) per benchmark, epoch and split, then mean ± std over splits, for every
+    task-type-only variant (embedding names starting with `task_prefix`, i.e. one row set per level combination).
     The paper's RQ1a ratio is the row with other == learned_name; it appears only once those results exist."""
     seen = df[~df["unseen"]].pivot_table(index=["benchmark", "epoch", "split_seed"], columns="embedding", values="A")
-    if task_name not in seen.columns:
-        return pd.DataFrame()
+    tasks = [c for c in seen.columns if c.startswith(task_prefix)]
+    others = [c for c in seen.columns if not c.startswith(task_prefix)]
     rows = []
-    for other in [c for c in seen.columns if c != task_name]:
-        ratio = (seen[task_name] / seen[other]).dropna().rename("ratio").reset_index()
-        ratio["other"] = other
-        rows.append(ratio)
+    for task in tasks:
+        for other in others:
+            ratio = (seen[task] / seen[other]).dropna().rename("ratio").reset_index()
+            ratio["task_variant"], ratio["other"] = task, other
+            rows.append(ratio)
     if not rows:
         return pd.DataFrame()
-    r = _mean_std(pd.concat(rows), ["benchmark", "epoch", "other"], ["ratio"]).rename(columns={"n": "n_splits"})
+    r = _mean_std(pd.concat(rows), ["benchmark", "epoch", "task_variant", "other"], ["ratio"]).rename(columns={"n": "n_splits"})
     r["is_rq1a"] = r["other"] == learned_name
     if not r["is_rq1a"].any():
         print(f"note: no seen-model rows for the learned embedding (name {learned_name!r}); the RQ1a ratio "
@@ -215,7 +220,8 @@ def pca_views(args, out: Path):
     load_data = find_load_data(args.loader)
     for bench in ([args.benchmark] if args.benchmark else ["llmrouterbench", "routerbench"]):
         data = load_data(bench, split_seed=0)
-        embs = {name: VARIANTS[name](data)(data.models)(data.queries) for name in ("task_type", "stats", "handcrafted")}
+        embs = {name: VARIANTS[name](data, tokenizer=args.tokenizer)(data.models)(data.queries)
+                for name in ("task_type_L1", "stats", "handcrafted")}
         E = embs["handcrafted"]
         Z, ratio = plots.pca_project(E, fit_idx=data.train)
         if getattr(data, "theme", None) is not None:
@@ -225,6 +231,46 @@ def pca_views(args, out: Path):
             out / f"pca_model_quality_{bench}.png", dpi=150, bbox_inches="tight")
         plots.plot_explained_variance(embs, fit_idx=data.train).savefig(
             out / f"explained_variance_{bench}.png", dpi=150, bbox_inches="tight")
+        plt.close("all")
+
+
+def stats_diagnostics(args, out: Path):
+    """Correlation structure of the numeric block on the training split: matrix (CSV + heatmap), strongly correlated
+    pairs, and the cumulative explained variance of the z-scored block against the whitened one."""
+    from matplotlib.colors import LinearSegmentedColormap
+    from run_handcrafted import find_load_data
+    from handcrafted import FEATURE_NAMES, HandcraftedEmbedding
+    load_data = find_load_data(args.loader)
+    diverging = LinearSegmentedColormap.from_list("div", [plots.ORANGE, "#e9e8e4", plots.BLUE])  # two poles, neutral middle
+    for bench in ([args.benchmark] if args.benchmark else ["llmrouterbench", "routerbench"]):
+        data = load_data(bench, split_seed=0)
+        plain = HandcraftedEmbedding(data, use_task_type=False, tokenizer=args.tokenizer)
+        white = HandcraftedEmbedding(data, use_task_type=False, whiten=True, tokenizer=args.tokenizer)
+        Z, W = plain.stats_block()[data.train], white.stats_block()[data.train]
+        with np.errstate(invalid="ignore", divide="ignore"):  # a constant feature has no correlation: shown as 0
+            corr = pd.DataFrame(np.corrcoef(Z, rowvar=False), index=FEATURE_NAMES, columns=FEATURE_NAMES).fillna(0.0)
+        corr.to_csv(out / f"stats_correlation_{bench}.csv")
+        pairs = [(a, b, corr.loc[a, b]) for i, a in enumerate(FEATURE_NAMES) for b in FEATURE_NAMES[i + 1:] if abs(corr.loc[a, b]) >= 0.7]
+        pairs.sort(key=lambda t: -abs(t[2]))
+        print(f"\n{bench}: statistics block on {len(data.train)} training queries; |r| >= 0.7 pairs:")
+        for a, b, r in pairs:
+            print(f"  {a:22s} {b:22s} r = {r:+.2f}")
+        print(f"  whitened block: {W.shape[1]} components, max |off-diagonal correlation| = "
+              f"{np.abs(np.corrcoef(W, rowvar=False) - np.eye(W.shape[1])).max():.2e}")
+        fig, ax = plt.subplots(figsize=(7.5, 6.5))
+        im = ax.imshow(corr.values, cmap=diverging, vmin=-1, vmax=1)
+        ax.set_xticks(range(len(FEATURE_NAMES)), FEATURE_NAMES, rotation=60, ha="right", fontsize=8)
+        ax.set_yticks(range(len(FEATURE_NAMES)), FEATURE_NAMES, fontsize=8)
+        ax.grid(False)
+        for i in range(len(FEATURE_NAMES)):          # label only the strong cells, so the picture stays readable
+            for j in range(len(FEATURE_NAMES)):
+                if i != j and abs(corr.values[i, j]) >= 0.5:
+                    ax.text(j, i, f"{corr.values[i, j]:+.1f}", ha="center", va="center", fontsize=6.5, color=plots.INK)
+        fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02, label="Pearson correlation (training split)")
+        ax.set_title(f"{bench}: correlation of the z-scored statistics", fontsize=11)
+        fig.savefig(out / f"stats_correlation_{bench}.png", dpi=150, bbox_inches="tight")
+        plots.plot_explained_variance({"stats (z-scored)": Z, "stats (whitened)": W}, max_components=Z.shape[1]).savefig(
+            out / f"stats_explained_variance_{bench}.png", dpi=150, bbox_inches="tight")
         plt.close("all")
 
 
@@ -241,7 +287,10 @@ def parse_args(argv=None):
     p.add_argument("--main-split", type=int, default=0, help="split used for the per-run figures")
     p.add_argument("--no-figures", action="store_true")
     p.add_argument("--pca", action="store_true", help="also draw the PCA views (loads the data)")
-    p.add_argument("--loader", default=None, help="for --pca: module:function giving load_data")
+    p.add_argument("--diagnostics", action="store_true",
+                   help="correlation matrix and whitening diagnostics of the statistics block (loads the data)")
+    p.add_argument("--loader", default=None, help="for --pca / --diagnostics: module:function giving load_data")
+    p.add_argument("--tokenizer", default="tiktoken:cl100k_base", help="for --pca / --diagnostics")
     return p.parse_args(argv)
 
 
@@ -268,7 +317,7 @@ def main(argv=None):
     ratio = rq1a_ratio(df, learned_name=args.learned_name)
     ratio.to_csv(out / "rq1a_ratio.csv", index=False)
     if not ratio.empty:
-        print("\nA(task_type) / A(other), seen-model setting")
+        print("\nA(task-type-only variant) / A(other), seen-model setting, per level combination")
         print(ratio.to_string(index=False))
 
     ptt = probes_to_target(df, args.target)
@@ -282,6 +331,8 @@ def main(argv=None):
         figures(df, curves, out / "figures", split=args.main_split)
         if args.pca:
             pca_views(args, out / "figures")
+    if args.diagnostics:
+        stats_diagnostics(args, out)
     print(f"\nwritten to {out}")
 
 
