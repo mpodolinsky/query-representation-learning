@@ -5,17 +5,25 @@ Representation (i) of the proposal, and the task-type-only variant for RQ1a, for
 so `fit(train_models)` ignores its argument and returns the same `embed`.
 
 ```
-phi(x) = [ w_onehot * onehot(task type of x) ,  w_stats * zscore(statistics of the query text) ]
+phi(x) = [ w_task * ( w_1 * onehot(L1 domain), w_2 * onehot(L2 subdomain), w_3 * onehot(L3 task) ),
+           w_stats * zscore(statistics of the query text)   (optionally PCA-whitened) ]
 ```
+
+Task type is a coarse-to-fine hierarchy (proposal, Figure 1): Level 1 domain (math, code, science, ...), Level 2
+subdomain (linear algebra, algorithms, biology, ...), Level 3 specific task. Level 1 is read off a taxonomy table
+keyed by the raw label Arman provides (the dataset name); Levels 2 and 3 come from an offline classification step
+run separately and arrive as extra per-query columns. A level without labels is skipped, so everything works with
+Level 1 alone until the finer labels exist.
 
 ## Files
 
 | File | What |
 |---|---|
-| `handcrafted.py` | the features (`FEATURES`), the one-hot encoder, the standardization, `HandcraftedEmbedding`, and the `fit` factories |
+| `handcrafted.py` | the features (`FEATURES`), the hierarchical one-hot block, the standardization and whitening, `HandcraftedEmbedding`, the `fit` factories and `VARIANTS` |
+| `task_taxonomy.py` | raw task-type label (dataset name) -> Level-1 domain, for the 21 LLMRouterBench and 8 RouterBench datasets, MMLU subjects and MMLU-Pro categories; `report`, `todos` |
 | `run_handcrafted.py` | the experiment loop (seen + unseen settings, all splits, both benchmarks) writing harness `results/` folders |
 | `analyze_handcrafted.py` | tables and figures from the `results/*/results.csv` files |
-| `test_handcrafted.py` | 18 tests on fake data, including the two scripts end to end (`python -m pytest -q` in this folder, about 5 s) |
+| `test_handcrafted.py` | 33 tests on fake data, including the two scripts end to end (`python -m pytest -q` in this folder, about 10 s) |
 | `HARNESS_NOTES.md` | proposed harness changes and interface questions for Michal and Arman |
 
 ## The features
@@ -39,27 +47,61 @@ Standardization is a z-score **fitted on `data.train` only**, applied to every q
 deviations. A constant feature stays at 0. The harness measures Euclidean distance, so without this one feature
 would dominate every neighbor search (the harness notebook shows this).
 
-The task-type block is a one-hot over the task types present in the **training** split (`data.theme`); a type
-never seen in training is an all-zero row.
+**Whitening (`whiten=True`).** n_tokens, n_chars, n_words and chars_per_token are strongly correlated, so in the
+Euclidean distance "length" counts several times. The whitened variants replace the z-scored block by its PCA
+whitening fitted on the training split (identity covariance on train; components with zero variance are dropped).
+`analyze_handcrafted.py --diagnostics` prints the correlated pairs and draws the correlation matrix.
 
-**Relative weight of the two blocks.** `onehot_weight` multiplies the one-hot block, `stats_weight` the numeric
-block. The default `onehot_weight="balanced"` scales the one-hot block so that its total variance on the training
-queries equals that of the numeric block, i.e. neither block dominates the squared distance by construction. Any
-float can be passed instead (e.g. `3.0` makes two queries of different type at least 3·√2 apart). This weight is
-the main knob of the representation; it is a CLI argument of the run script (`--onehot-weight`).
+## The task-type block
+
+One one-hot block per level, categories = the labels present in the **training** split, an unknown category (or a
+query without a label) = an all-zero row for that level. Where the labels of a level come from, in this order:
+
+1. the `labels` argument (`{level: array aligned with data.queries}`), e.g. loaded from the classifier's CSV
+   (`run_handcrafted.py --level-labels file.csv`);
+2. a per-query column of the data: `task_level1`, `task_level2`, `task_level3` by default (`level_columns`);
+3. for Level 1 only: the taxonomy (`task_taxonomy.level1_of`) applied to the raw label in `data.theme`;
+4. Level 0 is the raw label itself (the dataset name), for comparison with the flat one-hot.
+
+If the loader already provides a Level-1 column, the taxonomy is bypassed. Asking only for levels that have no
+source raises `MissingLevels` (the run script skips such variants and says so).
+
+**The taxonomy** (`task_taxonomy.py`) maps forgiving keys ("MMLU-Pro", "mmlu_pro", "MMLU Pro" are the same; split
+suffixes like ".val.5" are ignored) to the fixed domain set `DOMAINS`: math, code, logic, science, engineering,
+medicine, law, business, finance, humanities, social_science, knowledge, commonsense, affective,
+instruction_following, conversation, tool_use, rag, other. Per-subject labels (`mmlu-astronomy`, `mmlu_pro_law`)
+resolve through the MMLU subject and MMLU-Pro category maps. Unknown labels map to `other` with one warning listing
+them; `python -c "import task_taxonomy; print(task_taxonomy.report(data.theme))"` (or `run_handcrafted.py
+--dry-run`) prints the coverage of a real label column. Entries whose domain is a judgment call carry a `todo`
+(`task_taxonomy.todos()`), see the list at the end.
+
+**Relative weights.** `onehot_weight` multiplies the whole task-type block, `stats_weight` the numeric block, and
+`level_weights` (`{1: w1, 2: w2, 3: w3}`, default equal) the levels inside the task-type block. The default
+`onehot_weight="balanced"` scales the task-type block so that its total variance on the training queries equals that
+of the numeric block, i.e. neither block dominates the squared distance by construction. Any float can be passed
+instead. These are the main knobs of the representation (`--onehot-weight`, `--level-weights` in the run script).
 
 ## The variants (`handcrafted.VARIANTS`, the names written to `results.csv`)
 
-| Name | Factory | Blocks | Role |
-|---|---|---|---|
-| `task_type` | `fit_task_type_only(data)` | one-hot only | RQ1a: how much the task-type label alone captures |
-| `stats` | `fit_stats_only(data)` | statistics only | ablation: does the label add anything over the text statistics |
-| `handcrafted` | `fit_handcrafted(data)` | both | representation (i) |
-| (iii) | `fit_concat(other_embed, data)` | any other embedding + the `handcrafted` block | one-liner once the sentence embedding exists |
+| Name | Blocks | Role |
+|---|---|---|
+| `task_type_L1` | one-hot Level 1 (domain) | RQ1a per level |
+| `task_type_L2` | one-hot Level 2 (subdomain) | RQ1a per level (needs the Level-2 labels) |
+| `task_type_L3` | one-hot Level 3 (task) | RQ1a per level (needs the Level-3 labels) |
+| `task_type_L12`, `task_type_L123` | one-hot of several levels side by side | RQ1a, coarse + fine |
+| `task_type_raw` | one-hot of the raw label (dataset name) | the old flat one-hot, for comparison |
+| `stats`, `stats_whitened` | the 15 statistics, z-scored / PCA-whitened | ablation: does the label add anything over the text statistics |
+| `handcrafted_L1` | Level 1 + statistics | representation (i) with the coarse label only |
+| `handcrafted` | all available levels + statistics | representation (i), the main one |
+| `handcrafted_whitened` | all available levels + whitened statistics | representation (i), decorrelated numeric block |
+| (iii) | `fit_concat(other_embed, data)`: any other embedding + the `handcrafted` block | one-liner once the sentence embedding exists |
 
-`fit_concat` takes a frozen `embed(list[str]) -> ndarray`; `fit_concat_factory` takes a `fit` factory instead
-(for a learned embedding retrained per pool). `features_weight="balanced"` gives my block the same total training
-variance as the other embedding; pass a float to set it by hand.
+The run script's default list is `task_type_L1 task_type_L2 task_type_L12 task_type_L123 stats handcrafted`; variants
+whose levels have no labels are skipped automatically, so with Level 1 only it runs `task_type_L1 stats handcrafted`.
+The factories behind the names: `fit_task_type_only(data, levels=(1,))`, `fit_stats_only(data, whiten=False)`,
+`fit_handcrafted(data, levels=(1, 2, 3))`, and `fit_concat` / `fit_concat_factory` (the latter takes a `fit` factory,
+for a learned embedding retrained per pool; `features_weight="balanced"` gives my block the same total training
+variance as the other embedding).
 
 Why the factories take `data`: the harness passes `embed` a plain list of query strings, so the task-type label
 (which comes with the data, not from the text) is attached through a `query text -> theme` lookup built from
@@ -73,8 +115,9 @@ from router import Results
 from handcrafted import fit_handcrafted, fit_task_type_only, fit_stats_only, fit_concat
 
 out = Results(data, "llmrouterbench")
-out.run("task_type", fit_task_type_only(data), tune_k=True)
-out.run("handcrafted", fit_handcrafted(data), tune_k=True)
+out.run("task_type_L1", fit_task_type_only(data, levels=(1,)), tune_k=True)
+out.run("task_type_L12", fit_task_type_only(data, levels=(1, 2)), tune_k=True)
+out.run("handcrafted", fit_handcrafted(data), tune_k=True)                      # all available levels + statistics
 out.run("sentence+handcrafted", fit_concat(sentence_embed, data), tune_k=True)   # representation (iii)
 ```
 
@@ -92,17 +135,26 @@ python run_handcrafted.py --dry-run                                      # loads
 python run_handcrafted.py --benchmarks llmrouterbench --split-seeds 0    # main split first (development, plots)
 python run_handcrafted.py                                                # both benchmarks, splits 0 1 2, all variants
 python run_handcrafted.py --timeline replay                              # per-release-event pools and costs (see below)
+python run_handcrafted.py --level-labels my_levels.csv                   # finer labels from the offline classifier (CSV)
 
 python analyze_handcrafted.py --benchmark llmrouterbench                 # tables -> analysis/, figures -> analysis/figures/
 python analyze_handcrafted.py --benchmark llmrouterbench --pca           # also the PCA views (loads the data)
 python analyze_handcrafted.py --learned-name learned                     # RQ1a ratio once the learned rows exist
+python analyze_handcrafted.py --diagnostics --loader <module>:load_data  # correlation matrix and whitening check of the stats block
 ```
 
-Defaults of `run_handcrafted.py`: variants `task_type stats handcrafted`; probe budgets `1 2 5 10 20 50 100 500`;
+Defaults of `run_handcrafted.py`: variants `task_type_L1 task_type_L2 task_type_L12 task_type_L123 stats handcrafted`
+(the ones without labels are skipped); probe budgets `1 2 5 10 20 50 100 500`;
 5 probe seeds; `tune_k=True` with the harness grid `5 10 20 50 100 200`; 1000 bootstrap resamples for seen runs
 and 200 for unseen runs (`--n-boot`, `--n-boot-unseen`; `0` skips). The loader is found through `--loader
 module:function` (or `path/to/file.py:function`), `$QRL_LOADER`, or a few default names (`data:load_data`,
-`arman_data:load_data`, ...). A missing loader prints what was tried and how to point to it.
+`arman_data:load_data`, ...). A missing loader prints what was tried and how to point to it. `--dry-run` also prints,
+per split, which levels have labels and the taxonomy coverage of the raw labels (unknown labels marked), which is
+the first thing to look at when the data lands.
+
+`--level-labels file.csv` loads the finer labels from the classifier's output when they are not yet in Arman's data:
+a `query` column (the text) or an `index` column (position in `data.queries`), plus `task_level2` and/or
+`task_level3` (and `task_level1` to override the taxonomy). Queries without a row get the category `unlabeled`.
 
 **Two timeline modes.** `--timeline full-pool` (default, the README loop) keeps all models in the pool and holds
 each model out in turn; one results folder per split. `--timeline replay` restricts the pool at release event `t`
@@ -122,9 +174,13 @@ bootstrap are the whole cost. Reduce `--probe-seeds`, `--n-grid` or `--n-boot-un
   probe seeds, then mean ± std over splits (the spread over seeds is kept in `*_std_seeds`).
 - `A_unseen_curves.csv`: `A_unseen(n)` per variant, averaged over held-out models and splits (a summary; the harness
   README asks to report the events one by one, which `unseen_table.csv` does).
-- `rq1a_ratio.csv`: `A(task_type) / A(other)` per split, for every other embedding found in the results. The RQ1a row
-  is the one against the learned embedding (`--learned-name`, default `learned`); until those rows exist the script
-  says so and reports the ratios against `handcrafted` and `stats`.
+- `rq1a_ratio.csv`: `A(task_type_<levels>) / A(other)` per split, for every task-type-only variant (one row set per
+  level combination) and every other embedding found in the results. The RQ1a rows are the ones against the learned
+  embedding (`--learned-name`, default `learned`); until those rows exist the script says so and reports the ratios
+  against `handcrafted` and `stats`. The seen and unseen tables are per embedding name, so per level combination too.
+- with `--diagnostics` (loads the data): `stats_correlation_<bench>.csv/.png` (Pearson correlation of the z-scored
+  statistics on the training split), the pairs with |r| >= 0.7 printed, the whitened block's off-diagonal check, and
+  `stats_explained_variance_<bench>.png` (z-scored against whitened).
 - `probes_to_target.csv`: smallest `n` with `A_unseen(n) >= 0.9 A_seen` (paper definition) and smallest `n` with
   `recovery >= 0.9` (the harness decision log prefers this one), per case and summarized (median, share of cases that
   reach the target within the grid).
@@ -141,9 +197,19 @@ The code is written against the harness's `router.Data` stand-in. Check each ite
 - [ ] It returns `router.Data` (or an object with the same fields): `queries: list[str]`, `models: list[str]`,
       `S: (Q, M)` scores in [0, 1], `cost: (M,)` mean cost per model, `train`/`val`/`test` index arrays,
       `theme`, `split_seed`.
-- [ ] `theme` is filled: **one task-type label per query**, aligned with `queries`. Without it the `task_type` and
-      `handcrafted` variants raise; `stats` still runs. If his field is called differently (`task_type`, `category`,
-      `domain`), set `data.theme = data.<field>` in a one-line adapter.
+- [ ] `theme` is filled: **one raw task-type label per query**, aligned with `queries`. Without it (and without a
+      `task_level1` column) the task-type variants raise; `stats` still runs. If his field is called differently
+      (`task_type`, `dataset`, `source`), set `data.theme = data.<field>` in a one-line adapter.
+- [ ] **The exact label strings.** Level 1 is a lookup keyed by that string: ask for the list of distinct values
+      (`sorted(set(data.theme))`) and run `task_taxonomy.report(data.theme)` (or `run_handcrafted.py --dry-run`).
+      Every value must resolve to a domain other than `other`; add aliases to `task_taxonomy.TAXONOMY` for the rest.
+      In particular: is MMLU one label or per subject (`mmlu-astronomy.val.5`?), does MMLU-Pro keep its category,
+      does BBH keep its sub-task, what is the RouterBench RAG set called, and are split suffixes (`.val`, `.dev`)
+      part of the string?
+- [ ] **Finer levels.** If Arman's data carries a domain or subdomain already, the agreed column names must match
+      `level_columns` (`task_level1`, `task_level2`, `task_level3`), or be passed through `level_columns=`. A
+      loader-provided `task_level1` bypasses the taxonomy. Otherwise my classifier's CSV goes in through
+      `--level-labels` and must use the same query text (or index) as `data.queries`.
 - [ ] Query texts are **unique** (or duplicates share a label): my label lookup is by text (`HARNESS_NOTES.md`, item 1).
 - [ ] `queries` are plain strings (not prompt dicts or message lists); if they are, the adapter should extract the user
       text, since the statistics are computed on it.
@@ -159,6 +225,21 @@ The code is written against the harness's `router.Data` stand-in. Check each ite
 - [ ] The language of the queries: `frac_non_ascii` and `frac_uppercase` assume mostly English text; fine either way,
       but a multilingual benchmark would make `frac_non_ascii` a language indicator rather than a style feature.
 
-Design notes worth knowing when reading results: the `task_type` representation has only as many distinct points
-as there are types, so the kNN picks an arbitrary subset of same-type queries; the sensible `k` is large (the per-type
-mean), and the harness warns when the tuned `k` hits the top of the grid (`HARNESS_NOTES.md`, item 3).
+Design notes worth knowing when reading results: a task-type-only representation has only as many distinct points
+as there are label combinations, so the kNN picks an arbitrary subset of same-label queries; the sensible `k` is
+large (the per-label mean), and the harness warns when the tuned `k` hits the top of the grid (`HARNESS_NOTES.md`,
+item 3). The coarser the level, the fewer the points and the stronger this effect.
+
+## Open TODOs in the taxonomy (`task_taxonomy.todos()`)
+
+Domains that are a judgment call, to confirm before the final runs:
+
+- **GPQA** -> `science` (authors: Knowledge). Graduate physics/chemistry/biology questions.
+- **ARC Challenge** -> `science` (authors: Commonsense Reasoning). Grade-school science questions.
+- **FinQA** -> `finance` (authors: Knowledge). Numerical reasoning over financial tables, also math-like.
+- **HLE** -> `knowledge` (catch-all). Expert questions from every field; map its subject field if it is kept.
+- **MMLU-Pro** -> `knowledge` without a category suffix, the MMLU-Pro category map with one.
+- **MMLU** -> `knowledge` without a subject, the MMLU subject map with one; RouterBench stores it per subject.
+- **BBH** -> `logic` (authors). 27 sub-tasks, some are language or math; a per-sub-task label would need its own map.
+- **ArenaHard** -> `instruction_following` (authors). Could be merged with `conversation` (MT-Bench).
+- **RAG** (RouterBench) -> `rag`. No formal name in the paper; the identifier string is unknown.
