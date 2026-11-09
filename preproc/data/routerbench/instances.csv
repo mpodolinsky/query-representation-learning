@@ -1,0 +1,10 @@
+instance,epoch,date,new_model,pool
+0,1,2023-07,claude-v2,claude-instant-v1;claude-v1;claude-v2
+1,1,2023-07,meta/llama-2-70b-chat,claude-instant-v1;claude-v1;meta/llama-2-70b-chat
+2,1,2023-07,WizardLM/WizardLM-13B-V1.2,claude-instant-v1;claude-v1;WizardLM/WizardLM-13B-V1.2
+3,2,2023-08,meta/code-llama-instruct-34b-chat,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat
+4,3,2023-09,mistralai/mistral-7b-chat,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat;mistralai/mistral-7b-chat
+5,4,2023-11,gpt-3.5-turbo-1106,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat;mistralai/mistral-7b-chat;gpt-3.5-turbo-1106
+6,4,2023-11,gpt-4-1106-preview,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat;mistralai/mistral-7b-chat;gpt-4-1106-preview
+7,4,2023-11,zero-one-ai/Yi-34B-Chat,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat;mistralai/mistral-7b-chat;zero-one-ai/Yi-34B-Chat
+8,5,2023-12,mistralai/mixtral-8x7b-chat,claude-instant-v1;claude-v1;claude-v2;meta/llama-2-70b-chat;WizardLM/WizardLM-13B-V1.2;meta/code-llama-instruct-34b-chat;mistralai/mistral-7b-chat;gpt-3.5-turbo-1106;gpt-4-1106-preview;zero-one-ai/Yi-34B-Chat;mistralai/mixtral-8x7b-chat

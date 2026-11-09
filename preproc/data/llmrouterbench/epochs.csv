@@ -1,0 +1,12 @@
+epoch,date,new_models,pool
+0,2025-03-24,deepseek-v3-0324,deepseek-v3-0324
+1,2025-05-22,claude-sonnet-4,deepseek-v3-0324;claude-sonnet-4
+2,2025-05-28,deepseek-r1-0528,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528
+3,2025-06-17,gemini-2.5-flash;gemini-2.5-pro,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro
+4,2025-07-21,qwen3-235b-a22b-2507,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507
+5,2025-07-25,qwen3-235b-a22b-thinking-2507,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507
+6,2025-07-26,intern-s1,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507;intern-s1
+7,2025-08-07,gpt-5-chat;gpt-5,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507;intern-s1;gpt-5-chat;gpt-5
+8,2025-09-05,kimi-k2-0905,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507;intern-s1;gpt-5-chat;gpt-5;kimi-k2-0905
+9,2025-09-22,deepseek-v3.1-terminus,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507;intern-s1;gpt-5-chat;gpt-5;kimi-k2-0905;deepseek-v3.1-terminus
+10,2025-09-30,glm-4.6,deepseek-v3-0324;claude-sonnet-4;deepseek-r1-0528;gemini-2.5-flash;gemini-2.5-pro;qwen3-235b-a22b-2507;qwen3-235b-a22b-thinking-2507;intern-s1;gpt-5-chat;gpt-5;kimi-k2-0905;deepseek-v3.1-terminus;glm-4.6
