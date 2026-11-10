@@ -53,7 +53,7 @@ MODEL_DIR="$MODEL_DIR" PYTHON="$PYTHON" bash labeling/check_env.sh
 if [ "$SMOKE" = "1" ]; then
     echo "== 2/4 smoke test: 50 random RouterBench queries -> $OUT_DIR/routerbench_limit50"
     $PYTHON labeling/label_tasks.py --benchmark routerbench --model "$MODEL_DIR" --out-dir "$OUT_DIR" --limit 50 \
-        --dtype bfloat16 --tp 1 --gpu-memory-utilization 0.90 --max-model-len 4096
+        --dtype bfloat16 --tp 1 --gpu-memory-utilization 0.90 --max-model-len 8192
     $PYTHON - <<PY
 import pandas as pd, glob
 df = pd.concat(pd.read_parquet(p) for p in glob.glob("$OUT_DIR/routerbench_limit50/shard_*.parquet"))
@@ -65,10 +65,11 @@ else
 fi
 
 echo "== 3/4 full run, both benchmarks (shards of 1000, resumable)"
+# --max-model-len 8192: 167 LLMRouterBench prompts (ARC-AGI, some HLE) exceed 4096-64 tokens (labeling/README.md)
 rc=0
 $PYTHON labeling/label_tasks.py --benchmark all --model "$MODEL_DIR" --out-dir "$OUT_DIR" \
     --shard-size 1000 --max-query-chars 3000 --dtype bfloat16 --tp 1 --gpu-memory-utilization 0.90 \
-    --max-model-len 4096 --max-tokens 64 || rc=$?
+    --max-model-len 8192 --max-tokens 64 || rc=$?
 if [ "$rc" = "3" ]; then echo "== time budget reached before the last shard; resubmit this job to resume"; exit 3; fi
 [ "$rc" = "0" ] || { echo "== labeling failed (rc=$rc)"; exit "$rc"; }
 

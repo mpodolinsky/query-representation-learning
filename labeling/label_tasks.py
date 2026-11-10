@@ -105,6 +105,26 @@ def build_messages(query: str, theme: str, subtask: str, max_query_chars: int) -
     return [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": user}], truncated
 
 
+def fit_messages(query: str, theme: str, subtask: str, max_query_chars: int, labeler=None) -> tuple[list[dict], bool]:
+    """build_messages, then shrink the query (x0.8 per step) until the rendered prompt fits the model's context.
+    Uses `labeler.prompt_tokens(messages)` and `labeler.max_prompt_tokens` when the labeler provides them (vLLM);
+    a labeler without them (tests, stubs) gets the plain character truncation. Returns (messages, truncated)."""
+    msgs, truncated = build_messages(query, theme, subtask, max_query_chars)
+    count = getattr(labeler, "prompt_tokens", None)
+    limit = getattr(labeler, "max_prompt_tokens", None)
+    if count is None or limit is None:
+        return msgs, truncated
+    chars = max_query_chars if max_query_chars > 0 else len(query)
+    n = count(msgs)
+    while n > limit and chars > 50:
+        chars = int(chars * 0.8)
+        msgs, truncated = build_messages(query, theme, subtask, chars)
+        n = count(msgs)
+    if n > limit:
+        raise RuntimeError(f"prompt still {n} tokens > {limit} after shrinking the query to {chars} chars; raise --max-model-len")
+    return msgs, truncated
+
+
 # ------------------------------------------------------------------------------------------------ output parsing
 
 @dataclass
@@ -114,6 +134,7 @@ class Label:
     level3: str
     consistent: bool
     raw_output: str
+    truncated: bool = False
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -164,6 +185,16 @@ class VllmLabeler:
             self.sampling = SamplingParams(temperature=0.0, max_tokens=max_tokens,
                                            guided_decoding=GuidedDecodingParams(json=schema))
         self.chat_template_kwargs = {"enable_thinking": False}  # Qwen3: no thinking block
+        self.max_prompt_tokens = max_model_len - max_tokens
+        self.tokenizer = self.llm.get_tokenizer()
+
+    def prompt_tokens(self, messages: list[dict]) -> int:
+        """Token length of the rendered chat prompt (used to shrink over-long queries before they reach the engine)."""
+        try:
+            s = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **self.chat_template_kwargs)
+        except TypeError:
+            s = self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return len(self.tokenizer(s, add_special_tokens=False).input_ids)
 
     def label(self, messages_list: list[list[dict]]) -> list[str]:
         try:
@@ -283,7 +314,7 @@ def load_cached_labels(bench_dir: Path, df: pd.DataFrame) -> dict[str, Label]:
     for r in done.itertuples(index=False):
         t = text_of.get(r.query_id)
         if t is not None and t not in cache:
-            cache[t] = Label(r.level1, r.level2, r.level3, bool(r.consistent), r.raw_output)
+            cache[t] = Label(r.level1, r.level2, r.level3, bool(r.consistent), r.raw_output, bool(r.truncated))
     return cache
 
 
@@ -319,20 +350,21 @@ def label_shard(sub: pd.DataFrame, labeler, cache: dict[str, Label], max_query_c
         first = sub.drop_duplicates("query").set_index("query")
         batch, trunc = [], {}
         for t in todo:
-            msgs, tr = build_messages(t, first.at[t, "theme"], first.at[t, "subtask"], max_query_chars)
+            msgs, tr = fit_messages(t, first.at[t, "theme"], first.at[t, "subtask"], max_query_chars, labeler)
             batch.append(msgs)
             trunc[t] = tr
         raws = labeler.label(batch)
         if len(raws) != len(todo):
             raise RuntimeError(f"model returned {len(raws)} outputs for {len(todo)} prompts")
         for t, raw in zip(todo, raws):
-            cache[t] = parse_output(raw)
+            lab = parse_output(raw)
+            lab.truncated = trunc[t]
+            cache[t] = lab
     rows = []
     for r in sub.itertuples(index=False):
         lab = cache[r.query]
-        _, truncated = truncate_middle(r.query, max_query_chars)
         rows.append((r.query_id, r.theme, r.subtask, lab.level1, lab.level2, lab.level3, lab.consistent, lab.raw_output,
-                     truncated))
+                     lab.truncated))
     return pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
 
 
@@ -428,7 +460,8 @@ def dry_run(benchmarks: list[str], args) -> dict:
         print(f"\n=== {b}: {len(df)} rows, {len(uniq)} unique query texts, {truncated} truncated at {args.max_query_chars} chars")
         print("prompt tokens: " + ", ".join(f"{k}={v:.0f}" if isinstance(v, float) else f"{k}={v}" for k, v in st.items()
                                              if k in ("mean", "median", "p90", "p99", "max", "over_limit")))
-        print(f"  (over_limit = prompts above max_model_len - max_tokens = {limit_tokens} tokens)")
+        print(f"  (over_limit = prompts above max_model_len - max_tokens = {limit_tokens} tokens; at run time these queries are "
+              f"shrunk until they fit and flagged truncated; raise --max-model-len to avoid that)")
         per_theme = pd.Series(lengths, index=uniq.theme.values).groupby(level=0).agg(["median", "max", "size"]).astype(int)
         print("  per theme (median / max / n):")
         for th, row in per_theme.iterrows():

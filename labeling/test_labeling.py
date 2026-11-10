@@ -245,6 +245,45 @@ def test_truncated_flag_recorded(tmp_path):
     assert len(sent) == 1 and len(sent[0]) < 1600
 
 
+def test_fit_messages_shrinks_to_token_limit():
+    class CountingStub(StubLabeler):
+        max_prompt_tokens = 400
+
+        def prompt_tokens(self, messages):
+            return len(messages[1]["content"]) // 4  # system prompt excluded: the test is about the query part
+
+    stub = CountingStub()
+    msgs, tr = lt.fit_messages("q " * 2000, "t", "s", 3000, stub)  # 3000 chars -> ~750 "tokens" > 400
+    assert tr and stub.prompt_tokens(msgs) <= 400 and "characters omitted" in msgs[1]["content"]
+    short, tr = lt.fit_messages("short query", "t", "s", 3000, stub)
+    assert not tr and "short query" in short[1]["content"]
+    plain, tr = lt.fit_messages("q " * 2000, "t", "s", 3000, StubLabeler())  # no token counter: char truncation only
+    assert tr and len(plain[1]["content"]) > 3000
+    stub.max_prompt_tokens = 10
+    with pytest.raises(RuntimeError, match="raise --max-model-len"):
+        lt.fit_messages("q " * 2000, "t", "s", 3000, stub)
+
+
+def test_shrunk_query_flagged_truncated(tmp_path):
+    class CountingStub(StubLabeler):
+        max_prompt_tokens = 400
+
+        def prompt_tokens(self, messages):
+            return len(messages[1]["content"]) // 4
+
+    df = lt.select_rows(fake_queries(n=4, n_dups=0), None)
+    df.loc[0, "query"] = "w " * 2000  # 4000 chars: character truncation to 3000, then token shrink
+    stub = CountingStub()
+    lt.run_benchmark(df, tmp_path / BENCH, stub, meta(), shard_size=100, max_query_chars=3000)
+    out = pd.read_parquet(lt.shard_path(tmp_path / BENCH, 0)).set_index("query_id")
+    assert out.truncated.sum() == 1 and bool(out.loc[df.loc[0, "query_id"], "truncated"])
+    sent = [m[1]["content"] for m in stub.prompts if "characters omitted" in m[1]["content"]]
+    assert len(sent) == 1 and len(sent[0]) // 4 <= 400
+    # resume reuses the stored flag
+    cache = lt.load_cached_labels(tmp_path / BENCH, df)
+    assert cache[df.loc[0, "query"]].truncated is True and cache[df.loc[1, "query"]].truncated is False
+
+
 # ---------------------------------------------------------------------------------------------------------- merge
 
 def run_full(data_root, out_dir, answer=None):
