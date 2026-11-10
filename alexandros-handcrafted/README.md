@@ -230,6 +230,37 @@ as there are label combinations, so the kNN picks an arbitrary subset of same-la
 large (the per-label mean), and the harness warns when the tuned `k` hits the top of the grid (`HARNESS_NOTES.md`,
 item 3). The coarser the level, the fewer the points and the stronger this effect.
 
+## Incoming task labels from `../labeling/` (Levels 1-3 for every query)
+
+The offline classification step now exists: [`../labeling/`](../labeling/README.md) labels every query of both
+benchmarks with a local LLM (Qwen3-32B through vLLM, closed taxonomy in `labeling/taxonomy.py`, 11 domains x 90
+subdomains plus a free-text Level 3). Its `merge_labels.py` writes `preproc/data/<benchmark>/task_labels.parquet`
+with `query_id, level1, level2, level3, consistent`, in the row order of `queries.parquet` (= the query index).
+
+How it plugs into this module, by column name (`handcrafted.DEFAULT_LEVEL_COLUMNS`):
+
+| labels file | this module | note |
+|---|---|---|
+| `level1` | `task_level1` | a loader-provided Level 1 **bypasses** `task_taxonomy.level1_of(theme)`; the two domain sets differ (11 LLM domains vs the 19 in `task_taxonomy.DOMAINS`), so `task_type_L1` changes meaning once the labels are in |
+| `level2` | `task_level2` | enables `task_type_L2`, `task_type_L12`, `task_type_L123`, the full `handcrafted` |
+| `level3` | `task_level3` | free text, 2-5 words; high cardinality, for inspection and later clustering, use with care as a one-hot |
+| `consistent` | (not used) | False when the model's Level 2 is not a subdomain of its Level 1; the labels keep the model's choice |
+
+Two ways to get them in (to settle with Arman, see the questions in `labeling/README.md`):
+
+1. the loader exposes them: `Data.task_level1/2/3` arrays aligned with `queries` (one `merge` on `query_id` in
+   `preproc/data.py`, Arman's call), nothing changes here;
+2. until then, `run_handcrafted.py --level-labels labels.csv` with an `index` column (row number in `queries.parquet`,
+   which is the row order of `task_labels.parquet`) or a `query` column, plus `task_level1`, `task_level2`,
+   `task_level3`:
+   ```python
+   import pandas as pd
+   l = pd.read_parquet("preproc/data/llmrouterbench/task_labels.parquet").reset_index(names="index")
+   l.rename(columns={"level1": "task_level1", "level2": "task_level2", "level3": "task_level3"}).to_csv("labels.csv", index=False)
+   ```
+
+Until `task_labels.parquet` exists the behavior is unchanged: Level 1 from the taxonomy table, Levels 2 and 3 skipped.
+
 ## Open TODOs in the taxonomy (`task_taxonomy.todos()`)
 
 Domains that are a judgment call, to confirm before the final runs:
