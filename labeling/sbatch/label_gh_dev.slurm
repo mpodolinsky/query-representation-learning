@@ -4,7 +4,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 02:00:00                # gh-dev limit
-#SBATCH -A TODO_ACCOUNT            # TODO: your allocation (sacctmgr show assoc user=$USER format=account)
+#SBATCH -A BCS25105            # allocation
 #SBATCH -o labeling/logs/%x-%j.out
 #SBATCH -e labeling/logs/%x-%j.err
 # Submit from the repo root:  mkdir -p labeling/logs && sbatch labeling/sbatch/label_gh_dev.slurm
@@ -38,7 +38,7 @@ SMOKE="${SMOKE:-1}"                                   # 0 to skip the 50-query s
 #     transformers 5.15, xgrammar 0.2.3; the GH200 driver here reports CUDA 13.1, so cu130 wheels run):
 #     PYTHON=/scratch/11034/atzanakak/biomni_vista/envs/biotaskbench/bin/python
 #     (alternative: .../envs/rl_harness312/bin/python = vLLM 0.24.0, torch 2.11.0+cu130)
-PYTHON="${PYTHON:-TODO_SET_PYTHON}"
+PYTHON="${PYTHON:-/scratch/11034/atzanakak/biomni_vista/envs/biotaskbench/bin/python}"   # option (c)
 # ---------------------------------------------------------------------------------------------------------------
 
 if [ "$PYTHON" = "TODO_SET_PYTHON" ]; then echo "set PYTHON (environment option a/b/c) in $0"; exit 2; fi
