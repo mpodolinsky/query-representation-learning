@@ -10,6 +10,7 @@ echo "== SLURM";  env | grep -E '^SLURM_(JOB_ID|JOB_PARTITION|JOB_END_TIME|JOB_N
 if [ -n "${SLURM_JOB_END_TIME:-}" ]; then echo "job ends in $(( (SLURM_JOB_END_TIME - $(date +%s)) / 60 )) min"; fi
 echo "== GPU";    nvidia-smi 2>/dev/null || echo "nvidia-smi not found (no GPU here?)"
 echo "== python"; command -v "${PYTHON%% *}" || echo "python not found: $PYTHON"; $PYTHON --version 2>&1
+echo "== build tools on PATH (FlashInfer JIT)"; command -v ninja || echo "ninja NOT on PATH"; command -v nvcc || echo "nvcc not on PATH (fine if VLLM_USE_FLASHINFER_SAMPLER=0)"
 $PYTHON - <<'PY'
 import importlib, platform
 print("platform", platform.machine(), "python", platform.python_version())

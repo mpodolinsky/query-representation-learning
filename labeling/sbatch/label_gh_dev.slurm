@@ -43,6 +43,11 @@ PYTHON="${PYTHON:-/scratch/11034/atzanakak/biomni_vista/envs/biotaskbench/bin/py
 
 if [ "$PYTHON" = "TODO_SET_PYTHON" ]; then echo "set PYTHON (environment option a/b/c) in $0"; exit 2; fi
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 VLLM_NO_USAGE_STATS=1 TOKENIZERS_PARALLELISM=false
+# The env's bin/ (ninja, nvcc for FlashInfer JIT builds) must be on PATH even though PYTHON is an absolute path;
+# job 1133078 died in warmup with "No such file or directory: 'ninja'". Greedy decoding needs no FlashInfer sampler,
+# so it is disabled too (no JIT compile at all).
+export PATH="$(dirname "$PYTHON"):$PATH"
+export VLLM_USE_FLASHINFER_SAMPLER=0
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$SCRATCH/vllm_cache}"     # torch.compile / cudagraph cache, reused across jobs
 export TMPDIR="${TMPDIR:-$SCRATCH/tmp}"; mkdir -p "$TMPDIR" labeling/logs
 
