@@ -14,7 +14,7 @@ from preproc.data import (BENCHMARKS, DATA_DIR, MODEL_TABLES, SPLIT_SEEDS, load_
                           sample_probes, unseen_instances)
 
 HERE = Path(__file__).parent
-EXPECTED = {"llmrouterbench": dict(queries=12068, models=13, events=11, instances=12, themes=9),
+EXPECTED = {"llmrouterbench": dict(queries=12066, models=13, events=11, instances=12, themes=9),
             "routerbench": dict(queries=36478, models=11, events=6, instances=9, themes=12)}
 
 
@@ -94,6 +94,8 @@ def test_query_text(bench):
     q = pd.read_parquet(DATA_DIR / bench / "queries.parquet")
     assert q["query"].str.len().gt(0).all()
     assert all(a in b for a, b in zip(q["query"], q["prompt"]))  # the bare question is part of the full prompt
+    # no text is repeated, so no split can hold a distance-0 neighbor of another split's query
+    assert q["query"].is_unique and q.prompt.is_unique
     assert load_data(bench, text="prompt").queries == q.prompt.tolist()
     if bench == "llmrouterbench":
         arc = q[q.theme == "arc-agi"]

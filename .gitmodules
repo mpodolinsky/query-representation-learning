@@ -1,0 +1,8 @@
+[submodule "deps/LLMRouterBench"]
+	path = deps/LLMRouterBench
+	url = git@github.com:ABarraghi/LLMRouterBench.git
+	branch = main
+[submodule "deps/routerbench"]
+	path = deps/routerbench
+	url = git@github.com:ABarraghi/routerbench.git
+	branch = main

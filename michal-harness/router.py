@@ -2,26 +2,15 @@
 import csv
 import json
 import subprocess
-from dataclasses import dataclass
+import sys
 from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
 
-
-@dataclass
-class Data:
-    """Stand-in for Arman's table until his schema is fixed."""
-    queries: list[str]
-    models: list[str]
-    S: np.ndarray       # (Q, M) observed scores in [0, 1]
-    cost: np.ndarray    # (M,) mean per-query cost at the evaluated epoch
-    train: np.ndarray   # query indices. One split per Data: run several split seeds to measure re-splitting variance
-    val: np.ndarray     # used ONLY to tune k. Embedding training (early stopping included) must never see it
-    test: np.ndarray
-    theme: np.ndarray | None = None  # task type of each query (e.g. math, code), used for plots and RQ1a
-    split_seed: int = 0              # which split this is; written to the results
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root, for preproc
+from preproc.data import Data, sample_probes  # noqa: E402,F401  (Data is re-exported for callers)
 
 
 def knn_indices(E_labeled, E_query, k):
@@ -133,13 +122,11 @@ def evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=Fals
     Q_hat[:, pool] = knn_estimate(E[tr], S_tr[:, pool], E[te], k)
     q_mean = S_tr.mean(0)  # mean train quality of every model, the new one included: the full-information single best
     if new is not None:
-        # probes: the first n_probes of a seeded permutation of the training queries, so the probes of a smaller
-        # budget are contained in those of a larger one (same seed), and every embedding gets the same probes
-        probes = np.random.default_rng(seed).permutation(len(tr))[:n_probes]
-        probe_ids = tr[probes]
-        Q_hat[:, [new]] = knn_estimate(E[probe_ids], S_tr[probes][:, [new]], E[te], k)
+        # probes: nested across budgets (same seed) and the same for every embedding, see preproc.data.sample_probes
+        probe_ids = sample_probes(tr, n_probes, seed)
+        Q_hat[:, [new]] = knn_estimate(E[probe_ids], data.S[probe_ids][:, [new]], E[te], k)
         q_mean_probes = q_mean.copy()
-        q_mean_probes[new] = S_tr[probes, new].mean()  # what the single best knows from the same probes
+        q_mean_probes[new] = data.S[probe_ids, new].mean()  # what the single best knows from the same probes
 
     lambdas = lambda_grid(data.cost, n_lambdas)
     policies = {"router": Q_hat, "single_best": np.broadcast_to(q_mean, Q_hat.shape), "oracle": S_te}

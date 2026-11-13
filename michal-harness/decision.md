@@ -71,7 +71,7 @@ Cost of this setup at full scale (80k test queries, 33 models, 500 λ): about 5 
 
 ## Interface `evaluate(data, fit, ...)` **[team: all]**
 
-- `data` is a `Data` container (queries, models, scores `S`, mean costs, train/val/test indices, optional `theme`) in `router.py`. It is a stand-in for Arman's table until his schema is fixed.
+- `data` is a `Data` container (queries, models, scores `S`, mean costs, train/val/test indices, optional `theme`) in `router.py`. It is Arman's `Data` in `preproc/data.py` (decided 2026-11-12), re-exported by `router.py`; the field order and defaults match what the harness reads, and `load_data` adds `benchmark`, `epoch`, `new_model` and others that the harness ignores.
 
 - `fit` is a factory `fit(train_models) -> embed_fn`, with `embed_fn(list[str]) -> ndarray`.
   Frozen embeddings ignore the `train_models` argument. Learned `φ_θ` retrains without `m'` for each leave-model-out run.
@@ -79,7 +79,7 @@ Cost of this setup at full scale (80k test queries, 33 models, 500 λ): about 5 
 - The setting is passed as plain arguments, not an object: `evaluate(fit, new_model=None, n_probes=None, seed=0)`.
   `new_model=None` is the seen-model setting. Otherwise it is the unseen setting with `n_probes` probes.
 - Full signature: `evaluate(data, fit, new_model=None, n_probes=None, seed=0, k=10, tune_k=False, k_grid=(5, 10, 20, 50, 100, 200), n_boot=1000, n_lambdas=500)`. It returns `gain`, `gain_same_probes` (unseen only), `gain_abs`, `gain_ci`, `A`, `A_single_best`, `k` (the one used), the λ grid, the three curves (router, single best, oracle), the test `Q_hat`, `q_mean` (full-information baseline), `q_mean_probes` (unseen only), the `probes` (query indices, None in the seen setting) and the `cost_range`. `n_boot=0` skips the bootstrap. `tune_k=True` ignores `k`.
-- The splits come from Arman's output. **Probe sets are generated on our side (decided 2026-11-08), not by Arman:** the probes of a run are the first `n_probes` of a seeded permutation of the training queries (`seed` argument). So the probes for a smaller budget are contained in those for a larger one (same seed), which makes the curve against `n` smoother. They do not depend on the embedding, so every embedding gets the same probes, and they follow the split because they are drawn from `data.train`.
+- The splits come from Arman's output. **Probe sets are generated on our side (decided 2026-11-08), not by Arman. Since 2026-11-12 the rule lives in his `preproc.data.sample_probes`, which `evaluate` calls (same result as before, plus an optional theme-stratified mode, not used by default):** the probes of a run are the first `n_probes` of a seeded permutation of the training queries (`seed` argument). So the probes for a smaller budget are contained in those for a larger one (same seed), which makes the curve against `n` smoother. They do not depend on the embedding, so every embedding gets the same probes, and they follow the split because they are drawn from `data.train`.
   Reasons: it is a one-liner, and probe sets per split, release event, budget and seed would be over a thousand lists to keep in sync. A stratified-by-task-type sampler (using `Data.theme`) is a possible later addition, still on our side.
 - `Data` has a `train`, a `val` and a `test` index set, an optional `theme`, and a `split_seed`. The splits come from Arman's output.
 
@@ -141,4 +141,4 @@ Cost of this setup at full scale (80k test queries, 33 models, 500 λ): about 5 
 
 ## Open
 
-- Data schema is not published yet (Arman). The repo has no commits. Nothing here is final until the schema lands.
+- Data schema landed in Arman's PR (`preproc/`, 2026-11-12). `router.py` imports it with a `sys.path` line for the repo root; a `pyproject.toml` with `pip install -e .` would be the cleaner alternative if more packages appear.

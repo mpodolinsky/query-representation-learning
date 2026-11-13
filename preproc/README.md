@@ -39,23 +39,34 @@ python3 -m venv .venv && .venv/bin/pip install "numpy>=2" pandas pyarrow scikit-
 | `splits/seed{0,1,2}.npz` | `train`, `val`, `test` query indices. |
 
 `reports/build_report.md` has the counts, coverage, cost audit, per-theme scores, epochs, instances and probe coverage.
+
+**Setup.** `deps/LLMRouterBench` and `deps/routerbench` are Git submodules (Arman's forks, over SSH, so you need a
+GitHub SSH key): clone with `git clone --recurse-submodules`, or run `git submodule update --init` in an existing
+clone. To change the benchmark code, commit and push inside the submodule first, then commit the updated submodule
+in this repo (`git add deps/LLMRouterBench`); pushing only the parent leaves teammates with a commit they cannot
+fetch. `git submodule update --remote` moves both to their fork's `main`. If you had `prepoc/v0.0` checked out before
+the switch to submodules, move `deps/LLMRouterBench/results/` aside before `git submodule update --init` (it fails on a
+non-empty folder) and move it back afterwards.
+
 To rebuild everything: `python preproc/build.py` (about 10 s). It needs the LLMRouterBench bundle extracted to
 `deps/LLMRouterBench/results/bench-release/` ([Hugging Face](https://huggingface.co/datasets/NPULH/LLMRouterBench),
 `bench-release.tar.gz`) and `routerbench_0shot.pkl` in the folder above the repo (or pass `--llmrb-dir` and
 `--routerbench-pkl`). It downloads two small metadata files into `preproc/raw/` (gitignored) and checks them against
-the Git LFS pointers in `deps/`.
+the Git LFS pointers in `deps/` (with `git-lfs` installed, the submodule already holds them and nothing is downloaded).
 
 ## Decisions (2026-11-09)
 
 **Benchmarks.**
 - *LLMRouterBench*: the 13 flagship models (Table 1) on the 9 datasets where all 13 have results: AIME, ARC-AGI v1,
-  ArenaHard, GPQA, HLE, LiveCodeBench, LiveMathBench, MMLU-Pro (`test_3000`), SimpleQA. **12,068 queries × 13
-  models.** SWE-Bench (no qwen3-thinking results) and τ²-Bench (no gpt-5-chat results) are dropped rather than
+  ArenaHard, GPQA, HLE, LiveCodeBench, LiveMathBench, MMLU-Pro (`test_3000`), SimpleQA. **12,066 queries × 13
+  models**, after dropping 2 questions that a second dataset also asks under its own template and grader (ArenaHard
+  repeats an AIME problem, MMLU-Pro an HLE one; the AIME and HLE copies are kept). SWE-Bench (no qwen3-thinking results) and τ²-Bench (no gpt-5-chat results) are dropped rather than
   imputed. This is not the LLMRouterBench paper's 10-dataset cost setting: ARC-AGI is in, SWE-Bench and τ²-Bench are out.
-- *RouterBench*: the 0-shot file. **36,478 queries × 11 models**, after dropping 16 duplicate prompts (a copy in
-  train and one in test would be a distance-0 neighbor) and the 3 `test-match` sanity prompts.
+- *RouterBench*: the 0-shot file. **36,478 queries × 11 models**, after dropping 16 duplicate prompts and the 3 `test-match` sanity prompts.
 - Scores are already in [0, 1] in both benchmarks, so "normalize per benchmark" is a check, not a transformation.
   ArenaHard (LLM judge) and RouterBench's GSM8K, MT-Bench and consensus_summary have non-binary scores.
+- No `query` or `prompt` text appears twice in either benchmark (the first copy is kept): a copy in train and one in
+  test would be a distance-0 neighbor, whichever text is embedded.
 
 **Query text.** `query` is the bare question (LLMRouterBench `origin_query`; the question part of RouterBench's
 prompt, the first turn for MT-Bench). `prompt` is the full text sent to the models. The full prompts carry

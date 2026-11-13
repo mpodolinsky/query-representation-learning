@@ -28,7 +28,7 @@ LLMRB_DATASETS = [("aime", "hybrid"), ("arc-agi", "v1"), ("gpqa", "test"), ("hle
                   ("simpleqa", "test"), ("arenahard", None)]
 LLMRB_EXCLUDED = {"swe-bench (verified)": "no qwen3-235b-a22b-thinking-2507 results",
                   "tau2 (test)": "no gpt-5-chat results"}
-# Upstream copies of two metadata files that are Git LFS pointers in deps/ (checked against the pointers' sha256)
+# Upstream copies of two metadata files that are Git LFS pointers in deps/ unless git-lfs is installed (see fetch_meta)
 META_FILES = {"hle_test.jsonl": "HLE/test.jsonl", "arenahard.jsonl": "ArenaHard/arena-hard-v2.jsonl"}
 META_URL = "https://media.githubusercontent.com/media/ynulihao/LLMRouterBench/main/data/{}"
 PROBE_NS = (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, None)  # None = every training query
@@ -38,17 +38,23 @@ PROBE_SEEDS = range(5)
 # ---------------------------------------------------------------------------------------------------- raw inputs
 
 def fetch_meta(meta_dir):
-    """Download the HLE and ArenaHard metadata (categories) if missing, and verify them against the LFS pointers."""
+    """The HLE and ArenaHard metadata (categories). Uses the submodule's copy if Git LFS checked it out; otherwise
+    downloads it into meta_dir (if missing) and verifies it against the submodule's LFS pointer."""
     meta_dir.mkdir(parents=True, exist_ok=True)
+    paths = {}
     for local, upstream in META_FILES.items():
-        path = meta_dir / local
+        dep = REPO / "deps/LLMRouterBench/data" / upstream
+        oid = re.match(rb"version https://git-lfs\.github\.com/spec/v1\noid sha256:([0-9a-f]{64})\n", dep.read_bytes())
+        if oid is None:  # git-lfs is installed, so the submodule holds the real file
+            paths[local] = dep
+            continue
+        path = paths[local] = meta_dir / local
         if not path.exists():
             print(f"downloading {upstream}")
             urllib.request.urlretrieve(META_URL.format(upstream), path)
-        pointer = (REPO / "deps/LLMRouterBench/data" / upstream).read_text()
-        oid = re.search(r"sha256:([0-9a-f]{64})", pointer).group(1)
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == oid, f"{path} does not match its LFS pointer"
-    return {k: [json.loads(line) for line in open(meta_dir / k)] for k in META_FILES}
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == oid.group(1).decode(), \
+            f"{path} does not match its LFS pointer"
+    return {k: [json.loads(line) for line in open(p)] for k, p in paths.items()}
 
 
 def load_llmrb(bench_dir, meta):
@@ -128,9 +134,11 @@ def load_routerbench(pkl):
 # ---------------------------------------------------------------------------------------------------- processing
 
 def dedupe(queries, scores, log):
-    """Drop exact duplicate prompts (keep the first): a copy in train and one in test would be a distance-0 neighbor."""
-    dup = queries.prompt.duplicated()
-    log["duplicate prompts dropped"] = int(dup.sum())
+    """Drop queries whose `query` or `prompt` text repeats an earlier one (keep the first): either can be the embedded
+    text, and a copy in train and one in test would be a distance-0 neighbor. This includes the same question asked by
+    two datasets under different templates (LLMRouterBench: AIME/ArenaHard, HLE/MMLU-Pro)."""
+    dup = queries["query"].duplicated() | queries.prompt.duplicated()
+    log["duplicate query or prompt texts dropped"] = int(dup.sum())
     queries = queries[~dup].reset_index(drop=True)
     return queries, scores[scores.query_id.isin(queries.query_id)].reset_index(drop=True)
 
