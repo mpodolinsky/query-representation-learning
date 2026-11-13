@@ -15,7 +15,7 @@ alone recover), evaluated at each level in [`../alexandros-handcrafted/`](../ale
 | `download_model.sh` | `hf download Qwen/Qwen3-32B --local-dir ...` for a login node (or symlink the copy already on scratch) |
 | `sbatch/label_gh_dev.slurm` | the Vista gh-dev job: check_env -> 50-query smoke test -> full run (both benchmarks) -> merge |
 | `test_labeling.py` | 19 CPU-only tests with a stub model (`python -m pytest -q labeling`, 2 s) |
-| `reports/` | `dry_run_prompt_stats.txt` now; `<benchmark>_labels_report.md` and `<benchmark>_handcheck_sample.csv` after the job |
+| `reports/` | `dry_run_prompt_stats.txt`, `<benchmark>_labels_report.md`, `<benchmark>_handcheck_sample.csv` (filled: `correct` = 1 / L1 / 0, `note`), `handcheck_summary.md` (accuracy and error classes from job 1134736) |
 | `out/` (gitignored) | `<benchmark>/shard_XXXXX.parquet`, `metadata.json`, `labels_full.parquet`; `<benchmark>_limitN/` for smoke runs |
 
 Input: `preproc/data/<benchmark>/queries.parquet` (Arman's build, committed on his branch; `query_id, theme, subtask,
@@ -180,8 +180,9 @@ of weights). Both are recorded in `metadata.json`.
    `labeling/out/`.
 4. **Level 3.** Keep as free text for inspection, or cluster into a closed list (embedding + k-means on the ~48K
    phrases) for a `task_type_L3` one-hot?
-5. **Hand-check.** 200 stratified rows per benchmark in `reports/<benchmark>_handcheck_sample.csv`; who checks what,
-   and what accuracy at Level 1 / Level 2 do we require before using the labels?
+5. **Hand-check.** Done once by Claude (`reports/handcheck_summary.md`): Level 1 94.0% / 92.5%, Levels 1+2 82.5% / 88.0%
+   (LLMRouterBench / RouterBench). A human spot-check of the `0` rows is still worth 20 minutes. Which accuracy do we
+   require before using Level 2, and do we bundle the v0.2.0 prompt fixes listed there?
 
 ## Before `sbatch`
 
