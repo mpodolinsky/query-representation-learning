@@ -35,7 +35,7 @@ All design decisions, with their reasons, are in [`decision.md`](decision.md). T
 |---|---|
 | `router.py` | the kNN estimator, routing, `evaluate`, `Results` (saving), bootstrap interval, `k` tuning |
 | `plots.py` | every figure, in one style |
-| `test_router.py` | 38 tests on synthetic data (also holds the synthetic data generator `make_data`) |
+| `test_router.py` | 41 tests on synthetic data (also holds the synthetic data generator `make_data`) |
 | `walkthrough.ipynb` | a guided tour with plots on the synthetic data |
 | `figures/` | the example figures shown below (from section 9 of the notebook) |
 
@@ -52,7 +52,7 @@ There is no command line script. You use Python:
 Python 3.10+ and numpy 2.0+ (`np.trapezoid` is used).
 
 ```
-pip install numpy scikit-learn matplotlib pytest
+pip install numpy scikit-learn matplotlib pytest pandas pyarrow    # pandas, pyarrow: preproc/data.py
 pip install ipykernel nbclient        # only for the notebook
 ```
 
@@ -101,7 +101,7 @@ Rules for an embedding:
 
 ## The data (`Data` in `router.py`)
 
-A stand-in until Arman's schema is fixed.
+`Data` is defined in `preproc/data.py` (Arman) and re-exported by `router.py`. Load it with `load_data` (see `preproc/README.md`).
 
 | Field | |
 |---|---|
@@ -112,6 +112,8 @@ A stand-in until Arman's schema is fixed.
 | `train`, `val`, `test` | index arrays into `queries` |
 | `theme` | optional, task type of each query (used for plots) |
 | `split_seed` | which split this is (default 0), written to the results |
+
+`load_data` adds `benchmark`, `query_ids`, `subtask`, `epoch` and `new_model` (the unseen model of an instance, pass it to `evaluate(new_model=...)`). The harness does not use them.
 
 ## Running experiments
 
@@ -144,7 +146,7 @@ For several splits, repeat it per split (each `Data` has its own `split_seed`, a
 
 ```python
 for split_seed in range(3):
-    data = load_data("llmrouterbench", split_seed=split_seed)    # from Arman's loader
+    data = load_data("llmrouterbench", split_seed=split_seed)    # from preproc.data import load_data
     out = Results(data, "llmrouterbench")
     ...                                                         # the loop above
 ```
@@ -230,7 +232,7 @@ plots.plot_pca_groups(Z[data.test], ratio, picks, "Model chosen by the router",
 Done: the router, the metrics, the bootstrap interval, `k` tuning, saved results, the plots and the tests.
 
 Still stand-ins or open:
-- `Data` is a stand-in for Arman's schema. An adapter will be written when his table exists. The mean cost per model and the splits come from him.
-- Probe sets are generated inside `evaluate` (a seeded permutation of the training queries, first `n_probes`), so a smaller budget's probes are contained in a larger one's and every embedding gets the same probes.
+- `Data`, the mean costs and the splits come from Arman's `preproc/data.py` (`load_data`). Nothing else is needed from him.
+- Probes come from `preproc.data.sample_probes` (a seeded permutation of the training queries, first `n_probes`), so a smaller budget's probes are contained in a larger one's and every embedding gets the same probes. It also has a theme-stratified option, not used by `evaluate` yet.
 - Probes-to-target and a sensitivity check on λ and `k` are optional and not implemented.
 - The `evaluate` interface and the results format still need sign-off from everyone.
