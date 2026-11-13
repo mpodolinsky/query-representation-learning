@@ -138,6 +138,15 @@ def handcheck_sample(df: pd.DataFrame, n: int = 200, seed: int = 0, min_per_clas
     return out
 
 
+def handcheck_filled(path: Path) -> bool:
+    """True when a hand-check CSV exists and someone has started filling its `correct` column."""
+    path = Path(path)
+    if not path.exists():
+        return False
+    df = pd.read_csv(path, keep_default_na=False)
+    return "correct" in df.columns and bool((df["correct"].astype(str) != "").any())
+
+
 def merge_benchmark(benchmark: str, out_dir: Path, data_root: Path, labels_out: Path | None, reports_dir: Path,
                     n_examples: int = 15, n_handcheck: int = 200, seed: int = 0) -> dict:
     bench_dir = Path(out_dir) / benchmark
@@ -161,7 +170,10 @@ def merge_benchmark(benchmark: str, out_dir: Path, data_root: Path, labels_out: 
     report_path = reports_dir / f"{benchmark}_labels_report.md"
     report_path.write_text(make_report(merged, benchmark, meta, n_examples, seed))
     sample_path = reports_dir / f"{benchmark}_handcheck_sample.csv"
-    handcheck_sample(merged, n_handcheck, seed).to_csv(sample_path, index=False)
+    if handcheck_filled(sample_path):
+        print(f"keeping {sample_path}: it already has `correct` values (delete it to draw a fresh sample)", file=sys.stderr)
+    else:
+        handcheck_sample(merged, n_handcheck, seed).to_csv(sample_path, index=False)
     return {"benchmark": benchmark, "rows": len(merged), "labels": str(labels_out), "report": str(report_path),
             "handcheck": str(sample_path), "inconsistent": int((~merged.consistent).sum()),
             "parse_errors": int((merged.level3 == PARSE_ERROR).sum())}

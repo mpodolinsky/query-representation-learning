@@ -339,6 +339,22 @@ def test_merge_coverage_errors(data_root, tmp_path):
         ml.merge_benchmark(BENCH, tmp_path / "empty", data_root, None, tmp_path / "r")
 
 
+def test_filled_handcheck_is_not_overwritten(data_root, tmp_path):
+    out_dir, reports = tmp_path / "out", tmp_path / "reports"
+    run_full(data_root, out_dir)
+    ml.merge_benchmark(BENCH, out_dir, data_root, None, reports, n_handcheck=10)
+    path = reports / f"{BENCH}_handcheck_sample.csv"
+    df = pd.read_csv(path, keep_default_na=False)
+    df.loc[0, "correct"] = "1"
+    df.to_csv(path, index=False)
+    ml.merge_benchmark(BENCH, out_dir, data_root, None, reports, n_handcheck=10)
+    again = pd.read_csv(path, keep_default_na=False)
+    assert again.loc[0, "correct"] == "1" and again.query_id.tolist() == df.query_id.tolist()
+    path.unlink()
+    ml.merge_benchmark(BENCH, out_dir, data_root, None, reports, n_handcheck=10)
+    assert (pd.read_csv(path, keep_default_na=False).correct == "").all()
+
+
 def test_handcheck_stratified():
     rng = np.random.default_rng(0)
     df = pd.DataFrame({"query_id": [f"q{i}" for i in range(1000)], "theme": "t", "subtask": "s", "query": "q",
