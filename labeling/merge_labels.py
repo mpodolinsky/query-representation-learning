@@ -43,16 +43,21 @@ def load_shards(bench_dir: Path) -> pd.DataFrame:
     return pd.concat([pd.read_parquet(p) for p in paths], ignore_index=True)
 
 
-def check_coverage(labels: pd.DataFrame, queries: pd.DataFrame) -> None:
-    """Every query_id of queries.parquet exactly once in the labels, nothing else."""
+def check_coverage(labels: pd.DataFrame, queries: pd.DataFrame) -> pd.DataFrame:
+    """Every query_id of queries.parquet exactly once in the labels. Label rows whose query_id is no longer in
+    queries.parquet (the data was deduplicated after labeling) are dropped with a warning; returns the kept labels."""
     dup = labels.query_id[labels.query_id.duplicated()]
     if len(dup):
         raise CoverageError(f"{len(dup)} duplicated query_id in the shards, e.g. {dup.head(3).tolist()}")
     have, want = set(labels.query_id), set(queries.query_id)
     missing, extra = want - have, have - want
-    if missing or extra:
-        raise CoverageError(f"coverage failed: {len(missing)} query_id missing (e.g. {sorted(missing)[:3]}), "
-                            f"{len(extra)} unknown (e.g. {sorted(extra)[:3]})")
+    if missing:
+        raise CoverageError(f"coverage failed: {len(missing)} query_id missing (e.g. {sorted(missing)[:3]})")
+    if extra:
+        print(f"warning: {len(extra)} labeled query_id not in queries.parquet any more, dropped: {sorted(extra)[:5]}",
+              file=sys.stderr)
+        labels = labels[~labels.query_id.isin(extra)]
+    return labels
 
 
 def md_table(df: pd.DataFrame, index: bool = True) -> str:
@@ -137,8 +142,7 @@ def merge_benchmark(benchmark: str, out_dir: Path, data_root: Path, labels_out: 
                     n_examples: int = 15, n_handcheck: int = 200, seed: int = 0) -> dict:
     bench_dir = Path(out_dir) / benchmark
     queries = load_queries(benchmark, data_root)
-    labels = load_shards(bench_dir)
-    check_coverage(labels, queries)
+    labels = check_coverage(load_shards(bench_dir), queries)
     meta_path = bench_dir / "metadata.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else None
     # row order = queries.parquet order

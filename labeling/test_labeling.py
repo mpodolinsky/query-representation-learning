@@ -325,8 +325,8 @@ def test_merge_coverage_errors(data_root, tmp_path):
     shards = lt.existing_shards(out_dir / BENCH)
     extra = pd.read_parquet(shards[0]).iloc[:1].assign(query_id="q/999")
     extra.to_parquet(out_dir / BENCH / "shard_00099.parquet", index=False)
-    with pytest.raises(ml.CoverageError, match="unknown"):
-        ml.merge_benchmark(BENCH, out_dir, data_root, None, tmp_path / "r")
+    res = ml.merge_benchmark(BENCH, out_dir, data_root, None, tmp_path / "r")  # orphan label row: warned and dropped
+    assert res["rows"] == 25 and "q/999" not in pd.read_parquet(data_root / BENCH / "task_labels.parquet").query_id.values
     (out_dir / BENCH / "shard_00099.parquet").unlink()
     shards[-1].unlink()
     with pytest.raises(ml.CoverageError, match="missing"):
