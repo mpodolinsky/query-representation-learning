@@ -58,13 +58,15 @@ the Git LFS pointers in `deps/` (with `git-lfs` installed, the submodule already
 
 **Benchmarks.**
 - *LLMRouterBench*: the 13 flagship models (Table 1) on the 9 datasets where all 13 have results: AIME, ARC-AGI v1,
-  ArenaHard, GPQA, HLE, LiveCodeBench, LiveMathBench, MMLU-Pro (`test_3000`), SimpleQA. **12,068 queries × 13
-  models.** SWE-Bench (no qwen3-thinking results) and τ²-Bench (no gpt-5-chat results) are dropped rather than
+  ArenaHard, GPQA, HLE, LiveCodeBench, LiveMathBench, MMLU-Pro (`test_3000`), SimpleQA. **12,066 queries × 13
+  models**, after dropping 2 questions that a second dataset also asks under its own template and grader (ArenaHard
+  repeats an AIME problem, MMLU-Pro an HLE one; the AIME and HLE copies are kept). SWE-Bench (no qwen3-thinking results) and τ²-Bench (no gpt-5-chat results) are dropped rather than
   imputed. This is not the LLMRouterBench paper's 10-dataset cost setting: ARC-AGI is in, SWE-Bench and τ²-Bench are out.
-- *RouterBench*: the 0-shot file. **36,478 queries × 11 models**, after dropping 16 duplicate prompts (a copy in
-  train and one in test would be a distance-0 neighbor) and the 3 `test-match` sanity prompts.
+- *RouterBench*: the 0-shot file. **36,478 queries × 11 models**, after dropping 16 duplicate prompts and the 3 `test-match` sanity prompts.
 - Scores are already in [0, 1] in both benchmarks, so "normalize per benchmark" is a check, not a transformation.
   ArenaHard (LLM judge) and RouterBench's GSM8K, MT-Bench and consensus_summary have non-binary scores.
+- No `query` or `prompt` text appears twice in either benchmark (the first copy is kept): a copy in train and one in
+  test would be a distance-0 neighbor, whichever text is embedded.
 
 **Query text.** `query` is the bare question (LLMRouterBench `origin_query`; the question part of RouterBench's
 prompt, the first turn for MT-Bench). `prompt` is the full text sent to the models. The full prompts carry

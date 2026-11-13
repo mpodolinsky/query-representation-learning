@@ -134,9 +134,11 @@ def load_routerbench(pkl):
 # ---------------------------------------------------------------------------------------------------- processing
 
 def dedupe(queries, scores, log):
-    """Drop exact duplicate prompts (keep the first): a copy in train and one in test would be a distance-0 neighbor."""
-    dup = queries.prompt.duplicated()
-    log["duplicate prompts dropped"] = int(dup.sum())
+    """Drop queries whose `query` or `prompt` text repeats an earlier one (keep the first): either can be the embedded
+    text, and a copy in train and one in test would be a distance-0 neighbor. This includes the same question asked by
+    two datasets under different templates (LLMRouterBench: AIME/ArenaHard, HLE/MMLU-Pro)."""
+    dup = queries["query"].duplicated() | queries.prompt.duplicated()
+    log["duplicate query or prompt texts dropped"] = int(dup.sum())
     queries = queries[~dup].reset_index(drop=True)
     return queries, scores[scores.query_id.isin(queries.query_id)].reset_index(drop=True)
 
