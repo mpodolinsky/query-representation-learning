@@ -39,11 +39,20 @@ python3 -m venv .venv && .venv/bin/pip install "numpy>=2" pandas pyarrow scikit-
 | `splits/seed{0,1,2}.npz` | `train`, `val`, `test` query indices. |
 
 `reports/build_report.md` has the counts, coverage, cost audit, per-theme scores, epochs, instances and probe coverage.
+
+**Setup.** `deps/LLMRouterBench` and `deps/routerbench` are Git submodules (Arman's forks, over SSH, so you need a
+GitHub SSH key): clone with `git clone --recurse-submodules`, or run `git submodule update --init` in an existing
+clone. To change the benchmark code, commit and push inside the submodule first, then commit the updated submodule
+in this repo (`git add deps/LLMRouterBench`); pushing only the parent leaves teammates with a commit they cannot
+fetch. `git submodule update --remote` moves both to their fork's `main`. If you had `prepoc/v0.0` checked out before
+the switch to submodules, move `deps/LLMRouterBench/results/` aside before `git submodule update --init` (it fails on a
+non-empty folder) and move it back afterwards.
+
 To rebuild everything: `python preproc/build.py` (about 10 s). It needs the LLMRouterBench bundle extracted to
 `deps/LLMRouterBench/results/bench-release/` ([Hugging Face](https://huggingface.co/datasets/NPULH/LLMRouterBench),
 `bench-release.tar.gz`) and `routerbench_0shot.pkl` in the folder above the repo (or pass `--llmrb-dir` and
 `--routerbench-pkl`). It downloads two small metadata files into `preproc/raw/` (gitignored) and checks them against
-the Git LFS pointers in `deps/`.
+the Git LFS pointers in `deps/` (with `git-lfs` installed, the submodule already holds them and nothing is downloaded).
 
 ## Decisions (2026-11-09)
 
