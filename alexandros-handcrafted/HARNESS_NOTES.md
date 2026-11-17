@@ -37,6 +37,23 @@ Things I ran into while plugging the handcrafted representation into `michal-har
    (`run_handcrafted.data_at_epoch`: models released up to the event, their columns of `S`, the epoch's cost) and
    write an `epoch.json` next to `results.csv`. If the harness grows a notion of epoch, I will switch to it.
 
+6. **`select_k` is recomputed in every unseen run, though it only depends on the embedding, the pool and `data.val`,
+   never on the probes.** With 8 budgets x 5 seeds per held-out model that is 40 identical tunings (9 kNN searches
+   and a 200-resample bootstrap each). My run script calls `router.select_k` once per (variant, held-out model)
+   and passes the result as `k=k, tune_k=False` to every budget x seed run; the numbers are identical (the test
+   `test_k_tuned_once_per_held_out_model_matches_tune_k_inside_every_run` checks it), and `k_tuning.csv` next to
+   `results.csv` records how each k was obtained. A cache keyed on (`new_model`, `k_grid`) inside `evaluate`, or a
+   `k` returned by a first call that the caller can pass back, would make this unnecessary. Related: the
+   `tune_k` column of `results.csv` is then `False` for those runs although the k was tuned.
+
+7. **`select_k` only reports the edge case as a printed warning.** To record which runs hit the edge of the grid I
+   capture stdout around the call and parse the message (`run_handcrafted.Tuning`). Returning the per-k validation
+   areas (or the raw best k) alongside the chosen k would let callers record it properly.
+
+8. **`meta.json`'s `-dirty` flag also fires on untracked files** (`git status --porcelain` lists them), so an
+   untracked analysis folder or a stray log marks every run dirty. `--untracked-files=no` would make the flag mean
+   "uncommitted changes to tracked files", which is what one wants to know when matching results to a commit.
+
 ## For Arman (what my code assumes about `load_data`)
 
 See the checklist in `README.md`, "Open assumptions about the data". The short version: `load_data(benchmark,

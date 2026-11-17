@@ -14,12 +14,12 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / "michal-harness"))
 sys.path.insert(0, str(HERE))
 
-from router import Data, Results, evaluate  # noqa: E402
+from router import Data, Results, evaluate, knn_indices  # noqa: E402
 from test_router import make_data  # noqa: E402
 import task_taxonomy  # noqa: E402
-from handcrafted import (FEATURE_NAMES, FEATURES, VARIANTS, HandcraftedEmbedding, MissingLevels, fit_concat,  # noqa: E402
-                         fit_concat_factory, fit_handcrafted, fit_stats_only, fit_task_type_only, get_tokenizer,
-                         level_labels, query_stats)
+from handcrafted import (DEFAULT_UNSEEN_VARIANTS, DEFAULT_VARIANTS, FEATURE_NAMES, FEATURES, VARIANTS,  # noqa: E402
+                         HandcraftedEmbedding, MissingLevels, fit_concat, fit_concat_factory, fit_handcrafted,
+                         fit_stats_only, fit_stats_within, fit_task_type_only, get_tokenizer, level_labels, query_stats)
 
 
 @dataclasses.dataclass
@@ -211,9 +211,37 @@ def test_unseen_category_at_test_time_is_an_all_zero_block(text):
     assert (E[data.test[:5], n1:] == 0).all() and (E[data.test[:5], :n1].sum(1) == 1).all()  # L1 still set, L2 zero
 
 
+def test_main_variant_is_levels_1_and_2_plus_stats_and_level_3_is_the_named_ablation(text):
+    main = fit_handcrafted(text, **WS)(None)
+    assert main.available_levels == [1, 2] and main.dim == main.n_task_dims + len(FEATURES)
+    assert VARIANTS["handcrafted"](text, **WS)(None).available_levels == [1, 2]
+    assert VARIANTS["handcrafted_L123"](text, **WS)(None).available_levels == [1, 2, 3]
+    assert "handcrafted" in DEFAULT_VARIANTS and "handcrafted_L123" in DEFAULT_VARIANTS
+    assert set(DEFAULT_VARIANTS) >= {"task_type_raw", "handcrafted_L1", "stats_whitened", "handcrafted_whitened", "stats_within_theme"}
+    assert set(DEFAULT_UNSEEN_VARIANTS) <= set(DEFAULT_VARIANTS)
+
+
+def test_within_theme_block_keeps_the_neighbors_inside_the_theme(text):
+    emb = fit_stats_within(text, level=0, **WS)(None)
+    assert emb.within_level == 0 and emb.n_within_dims == len(set(text.theme[text.train].tolist()))
+    assert emb.dim == len(FEATURES) + emb.n_within_dims and "within level 0" in emb.describe()
+    E = emb(text.queries)
+    tr, te = text.train, text.test
+    smallest = min((text.theme[tr] == t).sum() for t in set(text.theme[tr].tolist()))
+    k = min(5, smallest)
+    idx = knn_indices(E[tr], E[te], k)
+    assert (text.theme[tr][idx] == text.theme[te][:, None]).all()          # never crosses a theme boundary
+    stats_only = fit_stats_only(text, **WS)(None)(text.queries)
+    assert np.allclose(E[:, :len(FEATURES)], stats_only)                      # the statistics block is the same
+    with pytest.warns(UserWarning, match="within_weight"):
+        HandcraftedEmbedding(text, use_task_type=False, within_level=0, within_weight=1.0, **WS)
+    with pytest.raises(MissingLevels):                                        # no theme, nothing to restrict to
+        fit_stats_within(dataclasses.replace(text, theme=None), level=0, **WS)
+
+
 def test_level_1_only_data_skips_the_missing_levels(l1only):
     with pytest.warns(UserWarning, match="skipped"):
-        emb = fit_handcrafted(l1only, **WS)(None)                    # default levels (1, 2, 3): 2 and 3 are missing
+        emb = fit_handcrafted(l1only, **WS)(None)                    # default levels (1, 2): 2 is missing
     assert emb.available_levels == [1] and emb.dim == len(emb.level_categories[1]) + len(FEATURES)
     with pytest.raises(MissingLevels):
         fit_task_type_only(l1only, levels=(2,))
@@ -329,26 +357,45 @@ def test_run_and_analyze_scripts_end_to_end(tmp_path, capsys):
     assert "unseen runs" in printed and "taxonomy coverage" in printed and "level 2: " in printed
     assert not (tmp_path / "results").exists()
     variants = ["task_type_L1", "task_type_L2", "task_type_L12", "handcrafted"]
-    run_handcrafted.main(base + ["--new-models", "model2", "model3", "--variants", *variants])
+    run_handcrafted.main(base + ["--new-models", "model2", "model3", "--variants", *variants, "--unseen-variants", "all"])
     folders = sorted((tmp_path / "results").glob("*_split*"))
     assert [f.name[-6:] for f in folders] == ["split0", "split1"]
     rows = list(csv.DictReader(open(folders[0] / "results.csv")))
     assert len(rows) == 4 + 2 * 4 * 2 * 2  # 4 seen + (2 new models x 4 variants x 2 budgets x 2 seeds)
     assert {r["embedding"] for r in rows} == set(variants)
+    tuning = list(csv.DictReader(open(folders[0] / "k_tuning.csv")))  # one row per run, same ids, grid and edge flags
+    assert [t["run"] for t in tuning] == [r["run"] for r in rows] and all(t["k_grid"] == "10 20" for t in tuning)
+    assert {t["tuned"] for t in tuning} == {"per run", "once per held-out model"}
+    assert all(t["k"] == r["k"] for t, r in zip(tuning, rows)) and all(t["selected_k_at_edge"] == "True" for t in tuning)
+    # the default unseen loop runs the main variant only
+    run_handcrafted.main(base + ["--split-seeds", "0", "--new-models", "model3", "--variants", "task_type_L1", "handcrafted",
+                                 "--results-root", str(tmp_path / "default_unseen")])
+    rows = list(csv.DictReader(open(next((tmp_path / "default_unseen").glob("*_split0")) / "results.csv")))
+    assert [r["embedding"] for r in rows if r["new_model"]] == ["handcrafted"] * (2 * 2)
 
     analyze_handcrafted.main(["--results-root", str(tmp_path / "results"), "--out", str(tmp_path / "analysis"),
                               "--diagnostics", "--loader", loader, "--benchmark", "fakebench", "--tokenizer", "whitespace"])
     out = tmp_path / "analysis"
     assert {p.name for p in out.iterdir()} >= {"seen_table.csv", "seen_table.md", "unseen_table.csv", "A_unseen_curves.csv",
-                                             "rq1a_ratio.csv", "probes_to_target.csv", "figures",
+                                             "rq1a_ratio.csv", "probes_to_target.csv", "k_tuning_summary.csv", "figures",
                                              "stats_correlation_fakebench.csv", "stats_correlation_fakebench.png",
-                                             "stats_explained_variance_fakebench.png"}
-    assert len(list((out / "figures").glob("*.png"))) >= 4 + 8 + 1  # curves, gain vs probes, A_unseen
+                                             "stats_explained_variance_fakebench.png", "stats_predict_labels.csv",
+                                             "stats_predict_theme_fakebench.csv"}
+    figs = {p.name for p in (out / "figures").glob("*.png")}
+    assert len(figs) >= 4 + 8 + 1 + 1 + 1  # curves, gain vs probes, A_unseen, gain vs probes by variant, confusion
+    assert "gain_vs_probes_by_variant_fakebench_epoch-1.png" in figs and "stats_predict_theme_fakebench.png" in figs
     ratio = list(csv.DictReader(open(out / "rq1a_ratio.csv")))
     assert {r["task_variant"] for r in ratio} == {"task_type_L1", "task_type_L2", "task_type_L12"}
     assert {r["other"] for r in ratio} == {"handcrafted"}
+    seen_md = (out / "seen_table.md").read_text()
+    assert "k per split" in seen_md and "†" in seen_md  # k = 20 is the top of the grid (10, 20) in the fake runs
+    ptt = list(csv.DictReader(open(out / "probes_to_target.csv")))
+    assert {"median_n_recovery", "share_reached_recovery", "single_best_ratio", "A_target_vacuous"} <= set(ptt[0])
+    predict = list(csv.DictReader(open(out / "stats_predict_labels.csv")))
+    assert {p["target"] for p in predict} == {"theme"} and 0 <= float(predict[0]["logit_test_acc"]) <= 1
     printed = capsys.readouterr().out
     assert "Seen-model setting" in printed and "RQ1a ratio" in printed and "Probes to target" in printed and "whitened block" in printed
+    assert "as a classifier" in printed
 
     # Level 1 only: the level-2 variants are skipped, the others run
     run_handcrafted.main(common + ["--benchmarks", "fakebench_l1only", "--split-seeds", "0", "--new-models", "model3",
@@ -381,3 +428,34 @@ def test_run_script_explains_a_missing_loader():
     import run_handcrafted
     with pytest.raises(SystemExit, match="loader was not found"):
         run_handcrafted.find_load_data("no_such_module_xyz:load_data")
+
+
+def test_k_tuned_once_per_held_out_model_matches_tune_k_inside_every_run(text, tmp_path):
+    """The run script tunes k once per (variant, held-out model) and passes it to every budget x seed run; the
+    harness's own `tune_k=True` inside each run gives the same k and the same numbers."""
+    import run_handcrafted
+    fit = fit_handcrafted(text, **WS)
+    out = Results(text, "fake", root=tmp_path)
+    tuning = run_handcrafted.Tuning(out, (5, 10, 20))
+    k, info = tuning.select_k_once(fit, "model3", n_lambdas=50)
+    ours = tuning.run_unseen("handcrafted", fit, "model3", 10, 1, k, info, n_boot=0, n_lambdas=50)
+    theirs = evaluate(text, fit, new_model="model3", n_probes=10, seed=1, tune_k=True, k_grid=(5, 10, 20), n_boot=0, n_lambdas=50)
+    assert ours["k"] == theirs["k"] == k and ours["gain"] == theirs["gain"] and ours["A"] == theirs["A"]
+    assert tuning.rows[-1]["tuned"] == "once per held-out model" and tuning.rows[-1]["k"] == k
+
+
+def test_parquet_labels_are_matched_on_query_id(text, tmp_path):
+    pd = pytest.importorskip("pandas")
+    pytest.importorskip("pyarrow")
+    import run_handcrafted
+    ids = np.arange(len(text.queries))[::-1]                                  # ids in reverse row order
+    data = dataclasses.replace(text)
+    data.query_ids = ids
+    frame = pd.DataFrame({"query_id": ids[1:], "level1": [f"d{i}" for i in ids[1:]], "level2": "s", "level3": "t", "consistent": True})
+    path = tmp_path / "task_labels.parquet"
+    frame.sample(frac=1, random_state=0).to_parquet(path, index=False)  # shuffled: the match is by id, not by row
+    labels = run_handcrafted.load_parquet_labels(path, data)
+    assert set(labels) == {1, 2, 3} and labels[1][1] == f"d{ids[1]}" and labels[1][0] == "unlabeled"  # id ids[0] has no row
+    assert run_handcrafted.labels_for("none", "fakebench", data) is None
+    assert run_handcrafted.labels_for("auto", "no_such_benchmark", data) is None
+    assert run_handcrafted.labels_for(str(path), "fakebench", data)[2][5] == "s"

@@ -129,6 +129,16 @@ TAXONOMY: dict[str, Entry] = {
     "RAG": Entry("rag", "RAG", "routerbench", ("rag", "rag_dataset", "martian_rag"),
                  todo="the RouterBench RAG set has no formal name in the paper (800 client queries on sports, history, media, "
                       "politics). The identifier string is unknown; ask Arman"),
+    # ---- the theme strings as they appear in Arman's build (preproc/data/<benchmark>/queries.parquet)
+    "ARC-AGI": Entry("logic", "Reasoning", "llmrouterbench", ("arc-agi", "arcagi", "arc_agi"),
+                     note="abstraction puzzles on colored grids; not ARC Challenge (grade-school science)"),
+    "grade-school-math": Entry("math", "Math", "routerbench", ("grade_school_math", "gradeschoolmath"), note="RouterBench's name for GSM8K"),
+    "chinese": Entry("humanities", "Chinese language and culture", "routerbench", (),
+                     note="15 RouterBench Chinese sets (zodiac, riddles, classical poetry, idioms); 14 chinese-remainder-theorem rows are math"),
+    "consensus_summary": Entry("knowledge", "Summarization", "routerbench", ("consensussummary",), note="answer a question from several research claims"),
+    "bias_detection": Entry("knowledge", "Classification", "routerbench", ("biasdetection",), note="is this news sentence biased"),
+    "abstract2title": Entry("knowledge", "Summarization", "routerbench", ("abstracttotitle",), note="title for a paper abstract"),
+    "accounting_audit": Entry("business", "Accounting", "routerbench", ("accountingaudit",)),
     # ---- plain domain words, in case the loader already gives a coarse label (then it maps to itself)
     **{d: Entry(d, d, "any", (), note="a Level-1 domain name used directly as the label") for d in DOMAINS},
     "biology": Entry("science", "science", "any"), "physics": Entry("science", "science", "any"),

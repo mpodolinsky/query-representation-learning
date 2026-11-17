@@ -1,7 +1,14 @@
 """Handcrafted query representation (Alexandros, representation (i) of the proposal, plus the RQ1a variant).
 
-phi(x) = [ w_task * ( w_1 * onehot(level-1 domain), w_2 * onehot(level-2 subdomain), w_3 * onehot(level-3 task) ),
+phi(x) = [ w_task * ( w_1 * onehot(level-1 domain), w_2 * onehot(level-2 subdomain) ),
            w_stats * zscore(statistics of the query string)  (optionally PCA-whitened) ]
+
+The main variant (`handcrafted`) uses Levels 1 and 2. Level 3 is free text with thousands of categories (one per
+query, nearly), so its one-hot is a named ablation (`handcrafted_L123`, `task_type_L123`), not part of the default.
+A third, optional block (`within_level`) is a one-hot with a weight so large that the Euclidean nearest neighbors
+never cross a category boundary while the category still has neighbors to give: `stats_within_theme` is the
+statistics block with the kNN restricted to the query's own theme (dataset), to tell whether the statistics carry
+signal beyond the task type.
 
 Everything here is frozen: nothing depends on the model pool, so every `fit` factory ignores `train_models` and
 returns the same `embed`. The z-scores are fitted on `data.train` only (never on `data.val` or `data.test`) and the
@@ -22,7 +29,7 @@ Usage:
     from handcrafted import fit_handcrafted, fit_task_type_only, fit_stats_only, fit_concat
     out = Results(data, "llmrouterbench")
     out.run("task_type_L1", fit_task_type_only(data, levels=(1,)), tune_k=True)   # RQ1a per level
-    out.run("handcrafted", fit_handcrafted(data), tune_k=True)                  # all available levels + statistics
+    out.run("handcrafted", fit_handcrafted(data), tune_k=True)                  # Levels 1 + 2 + statistics
 """
 from __future__ import annotations
 
@@ -191,12 +198,17 @@ class HandcraftedEmbedding:
     the numeric block (neither block dominates the Euclidean distance by construction); with the numeric block off,
     "balanced" means 1.0. `level_weights` (dict level -> float, default 1.0 each) set the relative weight of the
     levels inside the task-type block before that scaling.
+    `within_level` (None by default) adds a one-hot of that level (0 = the raw theme) weighted by `within_weight`,
+    chosen so large that two queries of different categories are always farther apart than any two queries of the
+    same category: the harness's Euclidean kNN then stays inside the query's category as long as it has neighbors
+    left, and only then spills over (ordered by the other blocks). The construction warns if `within_weight` is
+    not large enough for the other blocks' spread on `data.queries`.
     The rows for `data.queries` are precomputed once; `embed` looks queries up by text and computes fresh statistics
     for texts it has not seen (those get all-zero task-type blocks, with a warning)."""
     data: object
     use_task_type: bool = True
     use_stats: bool = True
-    levels: tuple = (1, 2, 3)                  # requested task-type levels; the ones without a source are skipped
+    levels: tuple = (1, 2)                     # requested task-type levels; the ones without a source are skipped
     level_weights: dict | None = None          # level -> weight inside the task-type block (default 1.0 each)
     level_columns: dict = field(default_factory=lambda: dict(DEFAULT_LEVEL_COLUMNS))
     raw_column: str = "theme"                  # where the raw task-type label (dataset name) lives in the data
@@ -204,11 +216,14 @@ class HandcraftedEmbedding:
     onehot_weight: float | str = "balanced"
     stats_weight: float = 1.0
     whiten: bool = False
+    within_level: int | None = None            # restrict the kNN to this level's category (0 = raw theme); see above
+    within_weight: float = 100.0
     tokenizer: str = "tiktoken:cl100k_base"
     clip: float = 5.0
     features: list[Feature] = field(default_factory=lambda: list(FEATURES))
     # fitted state
     level_categories: dict = field(init=False, default_factory=dict)   # level -> sorted categories seen in train
+    within_categories: list = field(init=False, default_factory=list)  # categories of the within block (train)
     mean_: np.ndarray | None = field(init=False, default=None)
     std_: np.ndarray | None = field(init=False, default=None)
     whitening_: np.ndarray | None = field(init=False, default=None)
@@ -222,6 +237,7 @@ class HandcraftedEmbedding:
         queries = list(data.queries)
         self._rows: dict[str, np.ndarray] = {}
         self._lookups: dict[int, dict] = {}
+        self._within_lookup: dict = {}
         self.tokenizer_name, self._count_tokens = get_tokenizer(self.tokenizer) if self.use_stats else ("", None)
 
         if self.use_task_type:
@@ -260,6 +276,19 @@ class HandcraftedEmbedding:
             Z = np.zeros((len(queries), 0))
         self.onehot_scale = self._resolve_onehot_weight(H[train_idx], Z[train_idx])
         E = np.hstack([self.onehot_scale * H, self.stats_weight * Z])
+
+        if self.within_level is not None:
+            labs = level_labels(data, self.within_level, self.labels, self.level_columns, self.raw_column)
+            if labs is None:
+                raise MissingLevels(f"within_level={self.within_level} has no labels in the data")
+            self._within_lookup = _text_lookup(queries, labs, f"within level {self.within_level}")
+            self.within_categories = sorted(set(labs[train_idx].tolist()), key=str)
+            spread = 2 * np.linalg.norm(E, axis=1).max()        # upper bound of any distance inside a category
+            if spread >= self.within_weight * math.sqrt(2):
+                warnings.warn(f"within_weight={self.within_weight:g} is too small: two queries of one category can be "
+                              f"{spread:.1f} apart, more than the {self.within_weight * math.sqrt(2):.1f} between "
+                              f"categories; the kNN may cross categories. Raise within_weight.")
+            E = np.hstack([E, self._within_block(queries)])
         for q, row in zip(queries, E):
             self._rows.setdefault(q, row)
 
@@ -271,19 +300,28 @@ class HandcraftedEmbedding:
     def _level_weight(self, level) -> float:
         return float((self.level_weights or {}).get(level, 1.0))
 
+    @staticmethod
+    def _onehot(queries, lookup, cats) -> np.ndarray:
+        """(n, len(cats)) one-hot of the category of each query text; an unknown category is an all-zero row."""
+        index = {c: j for j, c in enumerate(cats)}
+        H = np.zeros((len(queries), len(cats)))
+        for i, q in enumerate(queries):
+            j = index.get(lookup.get(q))
+            if j is not None:
+                H[i, j] = 1.0
+        return H
+
     def _task_block(self, queries) -> np.ndarray:
         """Concatenated per-level one-hot blocks (unscaled by onehot_weight) for query texts."""
-        blocks = []
-        for level, cats in self.level_categories.items():
-            index = {c: j for j, c in enumerate(cats)}
-            H = np.zeros((len(queries), len(cats)))
-            lookup = self._lookups[level]
-            for i, q in enumerate(queries):
-                j = index.get(lookup.get(q))
-                if j is not None:
-                    H[i, j] = 1.0
-            blocks.append(self._level_weight(level) * H)
+        blocks = [self._level_weight(level) * self._onehot(queries, self._lookups[level], cats)
+                  for level, cats in self.level_categories.items()]
         return np.hstack(blocks) if blocks else np.zeros((len(queries), 0))
+
+    def _within_block(self, queries) -> np.ndarray:
+        """The weighted one-hot of the within-level category (empty when `within_level` is None)."""
+        if self.within_level is None:
+            return np.zeros((len(queries), 0))
+        return self.within_weight * self._onehot(queries, self._within_lookup, self.within_categories)
 
     def _raw(self, queries):
         X = query_stats(queries, self._count_tokens, self.features)
@@ -320,8 +358,12 @@ class HandcraftedEmbedding:
         return self.whitening_.shape[1] if self.whitening_ is not None else len(self.features)
 
     @property
+    def n_within_dims(self) -> int:
+        return len(self.within_categories)
+
+    @property
     def dim(self) -> int:
-        return self.n_task_dims + self.n_stats_dims
+        return self.n_task_dims + self.n_stats_dims + self.n_within_dims
 
     @property
     def feature_names(self) -> list[str]:
@@ -329,6 +371,7 @@ class HandcraftedEmbedding:
         if self.use_stats:
             names += [f"stats_pc{j + 1}" for j in range(self.n_stats_dims)] if self.whitening_ is not None \
                 else [f.name for f in self.features]
+        names += [f"within_L{self.within_level}={c}" for c in self.within_categories]
         return names
 
     def __call__(self, queries: list[str]) -> np.ndarray:
@@ -339,15 +382,15 @@ class HandcraftedEmbedding:
                 E[i] = self._rows[q]
         if missing:
             texts = [queries[i] for i in missing]
-            if self.use_task_type:
-                known = next(iter(self._lookups.values()), {})
+            if self.use_task_type or self.within_level is not None:
+                known = next(iter(self._lookups.values()), self._within_lookup)
                 unknown = [q for q in texts if q not in known]
                 if unknown:
                     warnings.warn(f"{len(unknown)} queries have no task-type label (not in data.queries); "
                                   "their task-type blocks are all zeros")
             H = self.onehot_scale * self._task_block(texts) if self.use_task_type else np.zeros((len(texts), 0))
             Z = self.stats_weight * self._stats_transform(self._raw(texts)) if self.use_stats else np.zeros((len(texts), 0))
-            E[missing] = np.hstack([H, Z])
+            E[missing] = np.hstack([H, Z, self._within_block(texts)])
         return E
 
     def fit(self, train_models=None):
@@ -367,6 +410,8 @@ class HandcraftedEmbedding:
         if self.use_stats:
             kind = f"{self.n_stats_dims} whitened components of {len(self.features)}" if self.whiten else f"{len(self.features)} z-scored"
             parts.append(f"{kind} statistics ({self.tokenizer_name}) x {self.stats_weight:g}")
+        if self.within_level is not None:
+            parts.append(f"kNN within level {self.within_level} ({self.n_within_dims} cats x {self.within_weight:g})")
         return " + ".join(parts) + f" -> d = {self.dim}"
 
 
@@ -383,8 +428,15 @@ def fit_stats_only(data, **kw) -> Callable:
     return HandcraftedEmbedding(data, use_task_type=False, use_stats=True, **kw).fit
 
 
-def fit_handcrafted(data, levels=(1, 2, 3), **kw) -> Callable:
-    """Representation (i): hierarchical task-type one-hot (the available levels among `levels`) + statistics."""
+def fit_stats_within(data, level=0, **kw) -> Callable:
+    """The statistics block with the kNN restricted to the query's own category of `level` (0 = the raw theme):
+    if this beats the category's one-hot alone, the statistics carry signal beyond the task type."""
+    return HandcraftedEmbedding(data, use_task_type=False, use_stats=True, within_level=level, **kw).fit
+
+
+def fit_handcrafted(data, levels=(1, 2), **kw) -> Callable:
+    """Representation (i): hierarchical task-type one-hot (the available levels among `levels`) + statistics.
+    The default is Levels 1 and 2; Level 3 (free text, thousands of categories) is the named ablation `_L123`."""
     return HandcraftedEmbedding(data, use_task_type=True, use_stats=True, levels=tuple(levels), **kw).fit
 
 
@@ -425,16 +477,22 @@ def _levels_variant(levels):
 
 
 VARIANTS = {  # name written in results.csv -> factory(data, **kw). Variants whose levels are missing raise MissingLevels.
-    "task_type_raw": _levels_variant((0,)),          # the raw label as given (dataset name)
+    "task_type_raw": _levels_variant((0,)),          # the raw label as given (dataset name): the proposal's flat one-hot
     "task_type_L1": _levels_variant((1,)),           # RQ1a per level
     "task_type_L2": _levels_variant((2,)),
     "task_type_L3": _levels_variant((3,)),
     "task_type_L12": _levels_variant((1, 2)),
-    "task_type_L123": _levels_variant((1, 2, 3)),
+    "task_type_L123": _levels_variant((1, 2, 3)),    # ablation: with the free-text Level 3 as a one-hot
     "stats": fit_stats_only,
     "stats_whitened": lambda data, **kw: fit_stats_only(data, whiten=True, **kw),
+    "stats_within_theme": lambda data, **kw: fit_stats_within(data, level=0, **kw),   # kNN inside the query's theme
     "handcrafted_L1": lambda data, **kw: fit_handcrafted(data, levels=(1,), **kw),
-    "handcrafted": fit_handcrafted,                  # all available levels + statistics
+    "handcrafted": fit_handcrafted,                  # representation (i): Levels 1 + 2 + statistics
+    "handcrafted_L123": lambda data, **kw: fit_handcrafted(data, levels=(1, 2, 3), **kw),   # ablation: + Level 3
     "handcrafted_whitened": lambda data, **kw: fit_handcrafted(data, whiten=True, **kw),
 }
-DEFAULT_VARIANTS = ["task_type_L1", "task_type_L2", "task_type_L12", "task_type_L123", "stats", "handcrafted"]
+DEFAULT_VARIANTS = ["task_type_raw", "task_type_L1", "task_type_L2", "task_type_L12", "task_type_L123",
+                    "stats", "stats_whitened", "stats_within_theme",
+                    "handcrafted_L1", "handcrafted", "handcrafted_L123", "handcrafted_whitened"]
+DEFAULT_UNSEEN_VARIANTS = ["handcrafted"]        # the unseen loop is 8 budgets x 5 seeds per held-out model: main variant only
+DEFAULT_K_GRID = (5, 10, 20, 50, 100, 200, 300, 500, 1000)   # the harness grid tops at 200, where every variant landed

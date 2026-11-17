@@ -89,10 +89,10 @@ level2=other, level3=PARSE_ERROR`; the report counts both).
 consistent`, in the row order of `queries.parquet` (= the query index). The handcrafted representation reads the
 levels from per-query columns `task_level1`, `task_level2`, `task_level3` when present
 (`handcrafted.DEFAULT_LEVEL_COLUMNS`), i.e. `level1 -> task_level1`, `level2 -> task_level2`, `level3 -> task_level3`.
-A provided `task_level1` bypasses the Level-1 lookup table `task_taxonomy.level1_of(theme)`. Until a loader exposes
-the columns, `run_handcrafted.py --level-labels labels.csv` takes them from a CSV (`index` or `query` column plus the
-three `task_level*` columns; see the README of the module for the two-line conversion). Level 3 is free text with
-high cardinality: meant for inspection and clustering into a closed Level 3 later, not for a one-hot as is.
+A provided `task_level1` bypasses the Level-1 lookup table `task_taxonomy.level1_of(theme)`. `run_handcrafted.py`
+reads the parquet itself by default (`--level-labels auto`, matched on `query_id`); a CSV (`index` or `query` column
+plus the three `task_level*` columns) can be given instead. Level 3 is free text with high cardinality: meant for
+inspection and clustering into a closed Level 3 later; as a one-hot it only appears in the `_L123` ablations.
 
 ## Taxonomy notes (v0.1.0) and the queries that motivated changes
 
