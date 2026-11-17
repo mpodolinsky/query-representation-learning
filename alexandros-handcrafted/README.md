@@ -27,7 +27,7 @@ is kept as a named ablation (`handcrafted_L123`), not in the default.
 | `task_taxonomy.py` | raw task-type label (dataset name) -> Level-1 domain, for the 21 LLMRouterBench and 8 RouterBench datasets, MMLU subjects and MMLU-Pro categories; `report`, `todos` |
 | `run_handcrafted.py` | the experiment loop (seen + unseen settings, all splits, both benchmarks) writing harness `results/` folders plus `k_tuning.csv` |
 | `analyze_handcrafted.py` | tables, figures and diagnostics from the `results/*/results.csv` files |
-| `test_handcrafted.py` | 38 tests on fake data, including the two scripts end to end (`python -m pytest -q` in this folder, about 15 s) |
+| `test_handcrafted.py` | 39 tests on fake data, including the two scripts end to end (`python -m pytest -q` in this folder, about 15 s) |
 | `RESULTS.md` | the final tables and the findings, in plain sentences |
 | `HARNESS_NOTES.md` | proposed harness changes and interface questions for Michal and Arman |
 
