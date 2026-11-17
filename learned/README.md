@@ -40,18 +40,24 @@ This runs the final-pool seen comparison, then the matched seen/unseen compariso
 LLMRouterBench instance 11 (GLM-4.6). Default probe budgets: 1, 5, 10, 20, 50, 100, 500.
 Use `--probe-budgets` to change them (positive integers no larger than the training split).
 
-For all release instances on both benchmarks, all three splits and multiple seeds:
+For all release instances on both benchmarks, all three splits, three training/probe
+seeds, and the complete k/lambda sensitivity checks:
 
 ```bash
-python -m learned.experiments \
-  --benchmarks llmrouterbench routerbench --splits 0 1 2 \
-  --training-seeds 0 1 2 --probe-seeds 0 1 2 \
-  --representations task_type handcrafted frozen combined regression contrastive \
-  --all-instances
+python -m learned.full_experiments --output results/learned/full --workers 3 --threads 2
+python -m learned.report --results results/learned/full
 ```
 
-This is the full experiment grid and can take substantially longer. Start with the first milestone.
-Individual instance numbers differ across benchmarks; use `--all-instances` for the combined run.
+This runner reuses fits and neighbor estimates, writes resumable result shards, and verifies
+every expected experiment key. It preserves the original harness's routing/area/bootstrap
+definitions, including 1,000 paired bootstrap resamples per main evaluation. Deterministic
+baselines are reused across training seeds. See the repository-root README for the measured
+results and completed coverage.
+
+The default full protocol contains 25,056 main rows and 300,672 sensitivity rows. Each main
+key gets the reference plus fixed k=5/10/20/50/100/200/400, lambda-grid densities 100/1,000,
+and narrower/wider lambda ranges. Sensitivity is one factor at a time; models are not retuned
+on test results. The earlier `learned.experiments` runner remains useful for individual runs.
 
 ## Training
 
