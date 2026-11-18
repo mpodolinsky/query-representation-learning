@@ -28,6 +28,7 @@ from router import Results  # noqa: E402
 import plots  # noqa: E402,F401  (also applies the team's shared plotting style)
 
 REPRESENTATIONS = ("task_type", "handcrafted", "frozen", "combined", "regression", "contrastive")
+REPRESENTATION_CHOICES = REPRESENTATIONS + ("combined_balanced",)
 
 
 def probes_to_target(budgets, areas, seen_area, fraction=0.9):
@@ -193,7 +194,7 @@ def parser():
     p.add_argument("--splits", nargs="+", type=int, choices=(0, 1, 2), default=[0])
     p.add_argument("--training-seeds", nargs="+", type=int, default=[0])
     p.add_argument("--probe-seeds", nargs="+", type=int, default=[0])
-    p.add_argument("--representations", nargs="+", choices=REPRESENTATIONS, default=["frozen", "regression"])
+    p.add_argument("--representations", nargs="+", choices=REPRESENTATION_CHOICES, default=["frozen", "regression"])
     settings = p.add_mutually_exclusive_group()
     settings.add_argument("--instances", nargs="+", type=int, help="Release instances to evaluate in addition to final-pool seen")
     settings.add_argument("--all-instances", action="store_true")

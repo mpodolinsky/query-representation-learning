@@ -69,7 +69,7 @@ def cached_embed(queries, values):
 
 
 def baselines(data, sentences):
-    """All four proposal baselines. Only handcrafted standardization is fitted, on train."""
+    """Proposal baselines and a balanced concatenation; all scales fit on train only."""
     themes = sorted(set(data.theme))
     onehot = (np.asarray(data.theme)[:, None] == np.asarray(themes)[None, :]).astype(np.float32)
     # Lexical token count is an inexpensive query-length statistic (not an API billing count).
@@ -77,7 +77,13 @@ def baselines(data, sentences):
                       for q in data.queries], dtype=np.float32)
     raw = np.column_stack([onehot, stats])
     handcrafted = StandardScaler().fit(raw[data.train]).transform(raw).astype(np.float32)
+    # Match average squared block norms, since Euclidean squared distances add by block.
+    # A single train-fitted scalar preserves relative geometry within each block.
+    sentence_energy = np.square(sentences.values[data.train].astype(np.float64)).sum(1).mean()
+    handcrafted_energy = np.square(handcrafted[data.train].astype(np.float64)).sum(1).mean()
+    weight = np.sqrt(sentence_energy / handcrafted_energy) if handcrafted_energy > 0 else 1.0
     values = {"task_type": onehot, "handcrafted": handcrafted,
               "frozen": sentences.values,
-              "combined": np.column_stack([sentences.values, handcrafted])}
+              "combined": np.column_stack([sentences.values, handcrafted]),
+              "combined_balanced": np.column_stack([sentences.values, handcrafted * weight])}
     return {name: cached_embed(data.queries, E) for name, E in values.items()}

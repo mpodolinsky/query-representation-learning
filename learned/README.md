@@ -84,6 +84,23 @@ on test results. The earlier `learned.experiments` runner remains useful for ind
 
 Handcrafted features are one-hot theme, character count, lexical token count and line count,
 standardized using training queries. `combined` concatenates them with frozen sentence vectors.
+It preserves the original unweighted baseline, whose handcrafted block can dominate distances.
+The optional `combined_balanced` baseline multiplies that block by
+`sqrt(mean_train(||sentence||²) / mean_train(||handcrafted||²))`, so both blocks have
+equal average squared norms on train. All scaling uses training queries only. This is
+a comparison of two versions of the proposal's concatenation, not another learned model.
+Run its complete grid separately to preserve the original six-entry results:
+
+```bash
+python -m learned.full_experiments --output results/learned/balanced \
+  --representations combined_balanced --workers 3 --threads 2
+python -m learned.report --results results/learned/full --balanced results/learned/balanced
+```
+
+The report publishes reviewable CSVs, protocol/coverage manifests, compressed sensitivity
+measurements and figures to tracked `results_summary/`. `michal-harness/router.py` is
+the reference for routing and metrics; real-data integration tests check the accelerator
+against it in seen and unseen settings, including the single-incumbent k=10 fallback.
 Task-type-only uses the one-hot theme. These are the proposal's non-learned baselines.
 
 ## Outputs and metrics

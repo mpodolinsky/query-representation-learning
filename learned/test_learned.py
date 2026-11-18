@@ -106,11 +106,25 @@ def test_baseline_standardization_uses_train_only(small):
     changed = replace(data, queries=list(data.queries))
     changed.queries[-1] = "long test query " * 1000
     second = baselines(changed, features)
-    for name in ("handcrafted", "combined"):
+    for name in ("handcrafted", "combined", "combined_balanced"):
         np.testing.assert_allclose(first[name](data.queries[:64]), second[name](data.queries[:64]))
-    assert set(first) == {"task_type", "handcrafted", "frozen", "combined"}
+    assert set(first) == {"task_type", "handcrafted", "frozen", "combined", "combined_balanced"}
     with pytest.raises(ValueError, match="labeled benchmark"):
         first["task_type"](["unseen question"])
+
+
+def test_balanced_concatenation_matches_train_block_energy(small):
+    data, features = small
+    embeds = baselines(data, features)
+    original = embeds["combined"](data.queries)
+    balanced = embeds["combined_balanced"](data.queries)
+    d = features.values.shape[1]
+    np.testing.assert_array_equal(balanced[:, :d], features.values)
+    np.testing.assert_allclose(np.square(balanced[data.train, :d]).sum(1).mean(),
+                               np.square(balanced[data.train, d:]).sum(1).mean(), rtol=1e-6)
+    # The historical baseline is preserved; balancing changes only its second block.
+    np.testing.assert_array_equal(original[:, d:], embeds["handcrafted"](data.queries))
+    assert not np.allclose(original[:, d:], balanced[:, d:])
 
 
 def test_proposal_metrics():

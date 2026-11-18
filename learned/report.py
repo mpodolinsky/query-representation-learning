@@ -2,6 +2,7 @@
 import argparse
 from dataclasses import asdict
 import hashlib
+import gzip
 import json
 from pathlib import Path
 import shutil
@@ -12,8 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .full_experiments import KEYS
-from .features import SentenceFeatures, fingerprint
+from .full_experiments import KEYS, verify_coverage
+from .features import SentenceFeatures, baselines, fingerprint
 from .train import TrainConfig
 from preproc.data import load_data, unseen_instances
 
@@ -168,7 +169,72 @@ def figures(main, sensitivity, output):
     return paths
 
 
-def build_report(root, repo, export):
+def export_snapshot(root, destination):
+    """Publish small, reviewable results, leaving checkpoints and caches gitignored."""
+    destination.mkdir(parents=True, exist_ok=True)
+    required = ["protocol.json", "coverage.json", "metrics.csv", "summary.csv", "probes_to_target.csv"]
+    optional = ["seen_summary.csv", "unseen_summary.csv", "sensitivity_summary.csv",
+                "training_audit.csv", "training_audit.json", "validation.json", "execution.json",
+                "lambda_outlier_reference_check.json", "block_scaling.csv", "comparison_seen.csv",
+                "comparison_unseen.csv"]
+    published = required + [n for n in optional if (root / n).exists()]
+    for name in published:
+        shutil.copy2(root / name, destination / name)
+    for path in root.glob("*.png"):
+        shutil.copy2(path, destination / path.name)
+        published.append(path.name)
+    # Include all sensitivity rows without putting a 53 MB plaintext file in Git.
+    with (root / "sensitivity.csv").open("rb") as source:
+        with (destination / "sensitivity.csv.gz").open("wb") as target:
+            with gzip.GzipFile(filename="", mode="wb", fileobj=target, mtime=0) as compressed:
+                shutil.copyfileobj(source, compressed)
+    published.append("sensitivity.csv.gz")
+    hashes = {name: hashlib.sha256((destination / name).read_bytes()).hexdigest()
+              for name in sorted(published)}
+    (destination / "sha256.json").write_text(json.dumps(hashes, indent=2) + "\n")
+
+
+def balanced_comparison(root, balanced, main):
+    protocol = json.loads((balanced / "protocol.json").read_text())
+    rows = pd.read_csv(balanced / "metrics.csv")
+    sens = pd.read_csv(balanced / "sensitivity.csv")
+    checked = verify_coverage(rows, sens, protocol)
+    assert checked == json.loads((balanced / "coverage.json").read_text())
+    original_protocol = json.loads((root / "protocol.json").read_text())
+    for key in ("benchmarks", "splits", "training_seeds", "probe_seeds", "probe_budgets", "n_boot"):
+        assert protocol[key] == original_protocol[key], f"Unmatched balancing protocol: {key}"
+    original = main[main.embedding == "combined"]
+    keys = [k for k in KEYS if k != "embedding"]
+    paired = original.merge(rows, on=keys, validate="one_to_one", suffixes=("_original", "_balanced"))
+    assert len(paired) == len(original) == len(rows)
+    joined = pd.concat([original, rows], ignore_index=True)
+    seen = seed_summary(joined[(joined.instance == -1) & (joined.setting == "seen")],
+                        ["benchmark", "embedding"])
+    unseen = seed_summary(joined[joined.setting == "unseen"],
+                          ["benchmark", "instance", "new_model", "embedding", "n_probes"])
+    seen.to_csv(balanced / "comparison_seen.csv", index=False)
+    unseen.to_csv(balanced / "comparison_unseen.csv", index=False)
+    scaling = []
+    for benchmark in protocol["benchmarks"]:
+        for split in protocol["splits"]:
+            data = load_data(benchmark, split_seed=split)
+            sentences = SentenceFeatures(data.queries, protocol["feature_cache"])
+            embeds = baselines(data, sentences)
+            h = embeds["handcrafted"](data.queries)[data.train].astype(np.float64)
+            e = sentences.values[data.train].astype(np.float64)
+            d = e.shape[1]
+            b = embeds["combined_balanced"](data.queries)[data.train, d:].astype(np.float64)
+            scaling.append(dict(benchmark=benchmark, split_seed=split,
+                sentence_mean_norm=np.linalg.norm(e, axis=1).mean(),
+                handcrafted_mean_norm=np.linalg.norm(h, axis=1).mean(),
+                handcrafted_weight=np.sqrt(np.square(e).sum(1).mean() / np.square(h).sum(1).mean()),
+                sentence_mean_squared_norm=np.square(e).sum(1).mean(),
+                balanced_handcrafted_mean_squared_norm=np.square(b).sum(1).mean()))
+    pd.DataFrame(scaling).to_csv(balanced / "block_scaling.csv", index=False)
+    return seen, unseen, checked
+
+
+def build_report(root, repo, export, balanced=None):
     root, repo, export = map(Path, (root, repo, export))
     coverage = json.loads((root / "coverage.json").read_text())
     assert coverage["complete"] and coverage["missing_main"] == coverage["missing_sensitivity"] == 0
@@ -181,6 +247,7 @@ def build_report(root, repo, export):
         raise ValueError("The project-wide README requires the full default protocol; inspect subset CSVs directly")
     main = pd.read_csv(root / "metrics.csv")
     sensitivity = pd.read_csv(root / "sensitivity.csv")
+    assert verify_coverage(main, sensitivity, protocol) == coverage
     training_audit = audit_training(root, protocol)
     seen = seed_summary(main[(main.instance == -1) & (main.setting == "seen")], ["benchmark", "embedding"])
     unseen = seed_summary(main[main.setting == "unseen"], ["benchmark", "instance", "new_model", "embedding", "n_probes"])
@@ -243,16 +310,54 @@ def build_report(root, repo, export):
         display.columns = ["Representation", "Mean A", "Split SD", "Training SD", "Mean gain"]
         lines += [markdown_table(display), ""]
         best = table.loc[table.A_mean.idxmax()]
-        lines += [f"Highest observed mean A here: **{best.embedding}** ({best.A_mean:.4f}).", "",
+        lines += [f"Highest observed mean A among the original six entries: **{best.embedding}** "
+                  f"({best.A_mean:.4f}). `combined` is the unweighted concatenation; "
+                  "this is not a claim that its block scaling is optimal.", "",
                   f"![{benchmark} seen results](@DATA@/{benchmark}_seen.png)", ""]
     lines += ["### Every unseen release at 500 probes", "",
         "Each cell is mean A over split/training/probe seeds. Compare representations within a row: "
         "different release pools have different cost ranges and oracle normalizers. The CSVs also contain "
-        "every smaller probe budget, gains, same-probe gains and bootstrap intervals.", ""]
+        "every smaller probe budget, gains, same-probe gains and bootstrap intervals. "
+        "**Single-incumbent unseen pools use fixed k=10** (LLMRouterBench instance 0); "
+        "other pools use validation-selected k. The same k estimates both incumbent and new-model "
+        "quality, capped by the available labels/probe budget.", ""]
     for benchmark, table in unseen[unseen.n_probes == 500].groupby("benchmark"):
         display = table.pivot(index=["instance", "new_model"], columns="embedding", values="A_mean").reset_index()
         lines += [f"**{benchmark}**", "", markdown_table(display), "",
                   f"![{benchmark} unseen release curves](@DATA@/{benchmark}_unseen_releases.png)", ""]
+    if balanced is not None:
+        balanced = Path(balanced)
+        balance_seen, balance_unseen, balance_coverage = balanced_comparison(root, balanced, main)
+        lines += ["### Concatenation scaling: original versus balanced", "",
+            "`combined` means the original concatenation `[e(q), h(q)]`: a unit-norm sentence "
+            "vector and train-standardized handcrafted features. Standardizing individual columns "
+            "does not balance these blocks. Theme features can dominate Euclidean distance, favoring "
+            "same-theme neighbors. The original tables and figures above refer to this unweighted version.", "",
+            "`combined_balanced` uses `[e(q), alpha * h(q)]`, where "
+            "`alpha = sqrt(mean_train(||e||²) / mean_train(||h||²))`. This fits one scalar using "
+            "training queries only and gives the blocks equal average squared norms on train. "
+            "It preserves within-block geometry; it does not force equal norms for each query or "
+            "guarantee equal distance contributions for every pair. No test labels select the weight.", "",
+            f"Both versions were evaluated on identical main and sensitivity grids. The additional "
+            f"balanced run has **{balance_coverage['main_actual']:,} main rows** and "
+            f"**{balance_coverage['sensitivity_actual']:,} sensitivity rows**, with zero missing or "
+            "duplicate keys. Original results were not overwritten. As with other deterministic "
+            "baselines, training-seed labels reuse identical results.", "",
+            "Final-pool seen comparison (means over the same three splits and training-seed labels):", "",
+            markdown_table(balance_seen[["benchmark", "embedding", "A_mean", "A_split_sd", "gain_mean"]]), "",
+            "Balancing slightly lowers mean A on LLMRouterBench and raises it on RouterBench. "
+            "These are descriptive differences; neither scaling is established as the best "
+            "concatenation, and no significance claim is made.", "",
+            "Every unseen release at 500 probes, using the same k-selection/fixed-k=10 policy stated above:", ""]
+        for benchmark, table in balance_unseen[balance_unseen.n_probes == 500].groupby("benchmark"):
+            display = table.pivot(index=["instance", "new_model"], columns="embedding", values="A_mean").reset_index()
+            lines += [f"**{benchmark}**", "", markdown_table(display), ""]
+        lines += ["[Block scaling audit](@DATA@/balanced/block_scaling.csv), "
+            "[balanced metrics](@DATA@/balanced/metrics.csv), "
+            "[balanced protocol](@DATA@/balanced/protocol.json), "
+            "[balanced coverage](@DATA@/balanced/coverage.json), "
+            "[seen comparison](@DATA@/balanced/comparison_seen.csv), "
+            "[all-budget unseen comparison](@DATA@/balanced/comparison_unseen.csv).", ""]
     lines += ["### Seed variability", "",
         "`seen_summary.csv` and `unseen_summary.csv` separate split SD, within-split training SD and "
         "within-split/training probe SD. These measure different sources of variation and are not added "
@@ -305,22 +410,38 @@ def build_report(root, repo, export):
         (f"`python -m pytest -q preproc michal-harness learned`: **{validation['passed']} passed, "
          f"{validation['skipped']} skipped**." if validation else
          "Run `python -m pytest -q preproc michal-harness learned` to check the implementation."), "",
+        "**`michal-harness/router.py` is the reference implementation** for routing, area and "
+        "paired-bootstrap metrics. The complete-grid accelerator must agree with it. "
         "Tests compare accelerated curves, areas, bootstrap intervals and validation-selected k to "
-        "the original harness. They also cover tied neighbors, exclusion of held-out model scores and "
+        "the reference. An offline integration test uses real `load_data('llmrouterbench', split_seed=0)` "
+        "queries, scores and splits with handcrafted features: seen, unseen at 20 and 500 probes, "
+        "and the single-incumbent k=10 case. It checks both neighbor/probe predictions and "
+        "end-to-end A, gain and interval (absolute tolerance 1e-10). No encoder download is required. "
+        "Tests also cover tied neighbors, exclusion of held-out model scores and "
         "external validation/test labels from training, checkpoint reloads, full-grid coverage and resumption. "
         "The coverage check requires every expected experiment key and rejects duplicates or non-finite metrics.", "",
         "## Reproduce and inspect", "",
         "From the repository root, activate the environment described in [setup instructions](@SETUP@), then:", "",
         "```bash", "python -m learned.full_experiments --output results/learned/full --workers 3 --threads 2", "",
-        "python -m learned.report --results results/learned/full", "```", "",
+        "python -m learned.full_experiments --output results/learned/balanced "
+        "--representations combined_balanced --workers 3 --threads 2", "",
+        "python -m learned.report --results results/learned/full --balanced results/learned/balanced", "```", "",
         "The full runner resumes completed shards and rejects an output directory with a different protocol. "
         "`coverage.json` verifies exact key coverage, not just total row counts. `protocol.json` stores the "
-        "grid, bootstrap count, training configuration and sensitivity definitions.", "",
+        "grid, bootstrap count, training configuration and sensitivity definitions. "
+        "**The tracked `results_summary/` folder contains the reviewable results**, including "
+        "the five requested files, both scaling variants, figures, audits and SHA-256 file manifests. "
+        "`summary.csv` uses a two-row pandas column header (read with `header=[0, 1]`); "
+        "its SD pools seed labels descriptively. Prefer `seen_summary.csv` and `unseen_summary.csv` "
+        "for separate split/train/probe variability. `sensitivity.csv.gz` contains every sensitivity "
+        "row, readable directly with pandas. Checkpoints and prediction caches remain gitignored.", "",
+        "- [Protocol](@DATA@/protocol.json)",
         "- [Main per-run metrics](@DATA@/metrics.csv)",
+        "- [Summary](@DATA@/summary.csv)",
         "- [Seen seed summary](@DATA@/seen_summary.csv)",
         "- [Unseen seed summary](@DATA@/unseen_summary.csv)",
         "- [Probes-to-target](@DATA@/probes_to_target.csv)",
-        "- [Sensitivity measurements](@DATA@/sensitivity.csv)",
+        "- [Sensitivity measurements (gzip)](@DATA@/sensitivity.csv.gz)",
         "- [Sensitivity summary](@DATA@/sensitivity_summary.csv)",
         "- [Coverage verification](@DATA@/coverage.json)", "",
         "- [Training-input audit](@DATA@/training_audit.csv)", "",
@@ -337,17 +458,15 @@ def build_report(root, repo, export):
         "and presentation if required. The old raw-data rebuild test remains skipped because its external "
         "raw inputs are not downloaded; all experiments use the checked-in processed datasets.", ""]
     text = "\n".join(lines)
-    relative = root.resolve().relative_to(repo.resolve()).as_posix()
-    (repo / "README.md").write_text(text.replace("@DATA@", relative).replace("@SETUP@", "learned/README.md"))
+    snapshot = repo / "results_summary"
+    export_snapshot(root, snapshot)
+    if balanced is not None:
+        export_snapshot(balanced, snapshot / "balanced")
+    (repo / "README.md").write_text(text.replace("@DATA@", "results_summary").replace("@SETUP@", "learned/README.md"))
     export.mkdir(parents=True, exist_ok=True)
-    for name in ["metrics.csv", "probes_to_target.csv", "seen_summary.csv", "unseen_summary.csv",
-                 "sensitivity.csv", "sensitivity_summary.csv", "coverage.json", "protocol.json",
-                 "training_audit.csv", "training_audit.json", "validation.json"] + paths:
-        if name == "validation.json" and not (root / name).exists():
-            continue
-        shutil.copy2(root / name, export / name)
-    if outlier_path.exists():
-        shutil.copy2(outlier_path, export / outlier_path.name)
+    export_snapshot(root, export)
+    if balanced is not None:
+        export_snapshot(balanced, export / "balanced")
     shutil.copy2(repo / "learned/README.md", export / "run-instructions.md")
     (export / "README.md").write_text(text.replace("@DATA@", str(export.resolve()))
                                     .replace("@SETUP@", str(export.resolve() / "run-instructions.md")))
@@ -359,5 +478,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", default="results/learned/full")
     parser.add_argument("--export", default="../outputs/learned-embedding-full")
+    parser.add_argument("--balanced", default="results/learned/balanced",
+                        help="Separate, complete combined_balanced run for the scaling comparison")
     args = parser.parse_args()
-    build_report(args.results, Path(__file__).resolve().parents[1], args.export)
+    build_report(args.results, Path(__file__).resolve().parents[1], args.export, args.balanced)

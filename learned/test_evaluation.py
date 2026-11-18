@@ -5,6 +5,11 @@ import pytest
 from learned.evaluation import MetricContext, Policy, lambda_grid, select_k
 from router import curve, evaluate, knn_estimate, realized, select_k as reference_select_k
 from test_router import make_data
+from types import SimpleNamespace
+
+from preproc.data import load_data
+from learned.features import baselines
+from learned.full_experiments import K_GRID, predict_all_k, probe_predictions
 
 
 @pytest.mark.parametrize("models", [1, 2, 5, 13])
@@ -54,3 +59,49 @@ def test_validation_k_matches_reference():
     actual = select_k(estimates, data.S[data.val], data.cost, ks)
     expected = reference_select_k(E, data, list(range(4)), k_grid=ks)
     assert actual == expected
+
+
+@pytest.mark.parametrize("instance,budget", [(5, None), (5, 20), (5, 500), (0, 20)])
+def test_real_benchmark_pipeline_matches_router_reference(tmp_path, instance, budget):
+    """Real scores/splits/pools, full kNN + probe paths, area and paired intervals.
+
+    Handcrafted features keep this regression test offline (no encoder download).
+    The single-incumbent case explicitly uses the documented k=10 fallback.
+    """
+    full = load_data("llmrouterbench", split_seed=0)
+    data = load_data("llmrouterbench", split_seed=0, instance=instance)
+    embed = baselines(full, SimpleNamespace(values=np.ones((len(full.queries), 1))))["handcrafted"]
+    E = embed(full.queries)
+    predictions = predict_all_k(full, E, tmp_path)
+    cols = [full.models.index(m) for m in data.models]
+    new = None if budget is None else data.models.index(data.new_model)
+    pool = [i for i in range(len(data.models)) if i != new]
+    val = {k: predictions[f"val{k}"][:, np.asarray(cols)[pool]] for k in K_GRID}
+    k = select_k(val, data.S[data.val][:, pool], data.cost[pool], K_GRID)
+    seed = 2
+    expected = evaluate(data, lambda models: embed,
+                        new_model=None if new is None else data.new_model,
+                        n_probes=budget, seed=seed, tune_k=len(pool) > 1,
+                        k=10, n_boot=20)
+    assert k == expected["k"]
+    estimates = predictions[f"test{k}"][:, cols].copy()
+    means = data.S[data.train].mean(axis=0)
+    probe_mean = None
+    if new is not None:
+        predicted, mean, ids = probe_predictions(data, E, new, budget, seed)
+        estimates[:, new] = predicted[k]
+        np.testing.assert_array_equal(ids, expected["probes"])
+        probe_mean = means.copy()
+        probe_mean[new] = mean
+    np.testing.assert_allclose(estimates, expected["Q_hat"], atol=1e-14, rtol=0)
+    context = MetricContext(data.S[data.test], data.cost, means)
+    actual, points = context.evaluate(Policy(estimates, data.S[data.test], data.cost),
+                                     lambda_grid(data.cost), n_boot=20, seed=seed,
+                                     probe_mean=probe_mean)
+    for key in ("gain", "A", "gain_abs", "A_single_best"):
+        assert actual[key] == pytest.approx(expected[key], abs=1e-10, rel=0)
+    if new is not None:
+        assert actual["gain_same_probes"] == pytest.approx(expected["gain_same_probes"], abs=1e-10)
+    np.testing.assert_allclose([actual["gain_ci_low"], actual["gain_ci_high"]],
+                               expected["gain_ci"], atol=1e-10, rtol=0)
+    np.testing.assert_allclose(points, expected["curves"]["router"], atol=1e-12, rtol=0)

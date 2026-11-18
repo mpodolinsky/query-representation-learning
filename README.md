@@ -51,9 +51,9 @@ Means over all three splits and three training seeds. Split SD is computed on sp
 | regression | 0.7266 | 0.0046 | 0.0037 | +4.47% |
 | task_type | 0.7238 | 0.0051 | 0.0000 | +4.05% |
 
-Highest observed mean A here: **combined** (0.7385).
+Highest observed mean A among the original six entries: **combined** (0.7385). `combined` is the unweighted concatenation; this is not a claim that its block scaling is optimal.
 
-![llmrouterbench seen results](results/learned/full/llmrouterbench_seen.png)
+![llmrouterbench seen results](results_summary/llmrouterbench_seen.png)
 
 **routerbench**
 
@@ -66,13 +66,13 @@ Highest observed mean A here: **combined** (0.7385).
 | regression | 0.7711 | 0.0034 | 0.0009 | +7.71% |
 | task_type | 0.7433 | 0.0069 | 0.0000 | +3.83% |
 
-Highest observed mean A here: **combined** (0.7731).
+Highest observed mean A among the original six entries: **combined** (0.7731). `combined` is the unweighted concatenation; this is not a claim that its block scaling is optimal.
 
-![routerbench seen results](results/learned/full/routerbench_seen.png)
+![routerbench seen results](results_summary/routerbench_seen.png)
 
 ### Every unseen release at 500 probes
 
-Each cell is mean A over split/training/probe seeds. Compare representations within a row: different release pools have different cost ranges and oracle normalizers. The CSVs also contain every smaller probe budget, gains, same-probe gains and bootstrap intervals.
+Each cell is mean A over split/training/probe seeds. Compare representations within a row: different release pools have different cost ranges and oracle normalizers. The CSVs also contain every smaller probe budget, gains, same-probe gains and bootstrap intervals. **Single-incumbent unseen pools use fixed k=10** (LLMRouterBench instance 0); other pools use validation-selected k. The same k estimates both incumbent and new-model quality, capped by the available labels/probe budget.
 
 **llmrouterbench**
 
@@ -91,7 +91,7 @@ Each cell is mean A over split/training/probe seeds. Compare representations wit
 | 10 | deepseek-v3.1-terminus | 0.7339 | 0.6684 | 0.7221 | 0.7274 | 0.7275 | 0.7047 |
 | 11 | glm-4.6 | 0.7328 | 0.6868 | 0.7198 | 0.7237 | 0.7250 | 0.7110 |
 
-![llmrouterbench unseen release curves](results/learned/full/llmrouterbench_unseen_releases.png)
+![llmrouterbench unseen release curves](results_summary/llmrouterbench_unseen_releases.png)
 
 **routerbench**
 
@@ -107,7 +107,61 @@ Each cell is mean A over split/training/probe seeds. Compare representations wit
 | 7 | zero-one-ai/Yi-34B-Chat | 0.7430 | 0.7348 | 0.7473 | 0.7379 | 0.7305 | 0.7427 |
 | 8 | mistralai/mixtral-8x7b-chat | 0.7560 | 0.7532 | 0.7590 | 0.7503 | 0.7592 | 0.7283 |
 
-![routerbench unseen release curves](results/learned/full/routerbench_unseen_releases.png)
+![routerbench unseen release curves](results_summary/routerbench_unseen_releases.png)
+
+### Concatenation scaling: original versus balanced
+
+`combined` means the original concatenation `[e(q), h(q)]`: a unit-norm sentence vector and train-standardized handcrafted features. Standardizing individual columns does not balance these blocks. Theme features can dominate Euclidean distance, favoring same-theme neighbors. The original tables and figures above refer to this unweighted version.
+
+`combined_balanced` uses `[e(q), alpha * h(q)]`, where `alpha = sqrt(mean_train(||e||²) / mean_train(||h||²))`. This fits one scalar using training queries only and gives the blocks equal average squared norms on train. It preserves within-block geometry; it does not force equal norms for each query or guarantee equal distance contributions for every pair. No test labels select the weight.
+
+Both versions were evaluated on identical main and sensitivity grids. The additional balanced run has **4,176 main rows** and **50,112 sensitivity rows**, with zero missing or duplicate keys. Original results were not overwritten. As with other deterministic baselines, training-seed labels reuse identical results.
+
+Final-pool seen comparison (means over the same three splits and training-seed labels):
+
+| benchmark | embedding | A_mean | A_split_sd | gain_mean |
+|---|---|---|---|---|
+| llmrouterbench | combined | 0.7385 | 0.0015 | 0.0618 |
+| llmrouterbench | combined_balanced | 0.7372 | 0.0022 | 0.0599 |
+| routerbench | combined | 0.7731 | 0.0028 | 0.0798 |
+| routerbench | combined_balanced | 0.7746 | 0.0024 | 0.0819 |
+
+Balancing slightly lowers mean A on LLMRouterBench and raises it on RouterBench. These are descriptive differences; neither scaling is established as the best concatenation, and no significance claim is made.
+
+Every unseen release at 500 probes, using the same k-selection/fixed-k=10 policy stated above:
+
+**llmrouterbench**
+
+| instance | new_model | combined | combined_balanced |
+|---|---|---|---|
+| 0 | claude-sonnet-4 | 0.8793 | 0.8796 |
+| 1 | deepseek-r1-0528 | 0.8260 | 0.8266 |
+| 2 | gemini-2.5-flash | 0.7782 | 0.7792 |
+| 3 | gemini-2.5-pro | 0.7954 | 0.7916 |
+| 4 | qwen3-235b-a22b-2507 | 0.7650 | 0.7643 |
+| 5 | qwen3-235b-a22b-thinking-2507 | 0.7546 | 0.7536 |
+| 6 | intern-s1 | 0.7659 | 0.7547 |
+| 7 | gpt-5-chat | 0.7374 | 0.7327 |
+| 8 | gpt-5 | 0.7561 | 0.7534 |
+| 9 | kimi-k2-0905 | 0.7324 | 0.7216 |
+| 10 | deepseek-v3.1-terminus | 0.7339 | 0.7239 |
+| 11 | glm-4.6 | 0.7328 | 0.7234 |
+
+**routerbench**
+
+| instance | new_model | combined | combined_balanced |
+|---|---|---|---|
+| 0 | claude-v2 | 0.8478 | 0.8478 |
+| 1 | meta/llama-2-70b-chat | 0.8484 | 0.8479 |
+| 2 | WizardLM/WizardLM-13B-V1.2 | 0.7990 | 0.7982 |
+| 3 | meta/code-llama-instruct-34b-chat | 0.7626 | 0.7627 |
+| 4 | mistralai/mistral-7b-chat | 0.7163 | 0.7165 |
+| 5 | gpt-3.5-turbo-1106 | 0.6935 | 0.6948 |
+| 6 | gpt-4-1106-preview | 0.7381 | 0.7386 |
+| 7 | zero-one-ai/Yi-34B-Chat | 0.7430 | 0.7464 |
+| 8 | mistralai/mixtral-8x7b-chat | 0.7560 | 0.7578 |
+
+[Block scaling audit](results_summary/balanced/block_scaling.csv), [balanced metrics](results_summary/balanced/metrics.csv), [balanced protocol](results_summary/balanced/protocol.json), [balanced coverage](results_summary/balanced/coverage.json), [seen comparison](results_summary/balanced/comparison_seen.csv), [all-budget unseen comparison](results_summary/balanced/comparison_unseen.csv).
 
 ### Seed variability
 
@@ -160,7 +214,7 @@ Maximum and 95th-percentile absolute change in A below are paired differences fr
 | lambda_range_narrow | 14310 | 0.0141 | 0.0011 |
 | lambda_range_wide | 14310 | 0.0044 | 0.0006 |
 
-![llmrouterbench k sensitivity](results/learned/full/llmrouterbench_k_sensitivity.png)
+![llmrouterbench k sensitivity](results_summary/llmrouterbench_k_sensitivity.png)
 
 **routerbench**
 
@@ -178,17 +232,17 @@ Maximum and 95th-percentile absolute change in A below are paired differences fr
 | lambda_range_narrow | 10746 | 0.0110 | 0.0020 |
 | lambda_range_wide | 10746 | 0.0026 | 0.0001 |
 
-![routerbench k sensitivity](results/learned/full/routerbench_k_sensitivity.png)
+![routerbench k sensitivity](results_summary/routerbench_k_sensitivity.png)
 
 **Interpretation:** k can materially change routing performance. Lambda-grid changes are usually smaller, but the maxima show that numerical stability cannot be assumed in every case. For example, the original, unmodified harness reproduced the task-type-only LLMRouterBench instance-10 unseen result (split 0, 10 probes, probe seed 1, k=200): A=0.5713 with 500 lambda points and A=0.6421 with 1,000. A coarse lambda sweep can miss useful cost-quality operating points. We retain the original main settings and report this sensitivity rather than choosing the test-favorable grid.
 
-[Original-harness check for this example](results/learned/full/lambda_outlier_reference_check.json)
+[Original-harness check for this example](results_summary/lambda_outlier_reference_check.json)
 
 ## Validation
 
-`python -m pytest -q preproc michal-harness learned`: **84 passed, 1 skipped**.
+`python -m pytest -q preproc michal-harness learned`: **91 passed, 1 skipped**.
 
-Tests compare accelerated curves, areas, bootstrap intervals and validation-selected k to the original harness. They also cover tied neighbors, exclusion of held-out model scores and external validation/test labels from training, checkpoint reloads, full-grid coverage and resumption. The coverage check requires every expected experiment key and rejects duplicates or non-finite metrics.
+**`michal-harness/router.py` is the reference implementation** for routing, area and paired-bootstrap metrics. The complete-grid accelerator must agree with it. Tests compare accelerated curves, areas, bootstrap intervals and validation-selected k to the reference. An offline integration test uses real `load_data('llmrouterbench', split_seed=0)` queries, scores and splits with handcrafted features: seen, unseen at 20 and 500 probes, and the single-incumbent k=10 case. It checks both neighbor/probe predictions and end-to-end A, gain and interval (absolute tolerance 1e-10). No encoder download is required. Tests also cover tied neighbors, exclusion of held-out model scores and external validation/test labels from training, checkpoint reloads, full-grid coverage and resumption. The coverage check requires every expected experiment key and rejects duplicates or non-finite metrics.
 
 ## Reproduce and inspect
 
@@ -197,20 +251,24 @@ From the repository root, activate the environment described in [setup instructi
 ```bash
 python -m learned.full_experiments --output results/learned/full --workers 3 --threads 2
 
-python -m learned.report --results results/learned/full
+python -m learned.full_experiments --output results/learned/balanced --representations combined_balanced --workers 3 --threads 2
+
+python -m learned.report --results results/learned/full --balanced results/learned/balanced
 ```
 
-The full runner resumes completed shards and rejects an output directory with a different protocol. `coverage.json` verifies exact key coverage, not just total row counts. `protocol.json` stores the grid, bootstrap count, training configuration and sensitivity definitions.
+The full runner resumes completed shards and rejects an output directory with a different protocol. `coverage.json` verifies exact key coverage, not just total row counts. `protocol.json` stores the grid, bootstrap count, training configuration and sensitivity definitions. **The tracked `results_summary/` folder contains the reviewable results**, including the five requested files, both scaling variants, figures, audits and SHA-256 file manifests. `summary.csv` uses a two-row pandas column header (read with `header=[0, 1]`); its SD pools seed labels descriptively. Prefer `seen_summary.csv` and `unseen_summary.csv` for separate split/train/probe variability. `sensitivity.csv.gz` contains every sensitivity row, readable directly with pandas. Checkpoints and prediction caches remain gitignored.
 
-- [Main per-run metrics](results/learned/full/metrics.csv)
-- [Seen seed summary](results/learned/full/seen_summary.csv)
-- [Unseen seed summary](results/learned/full/unseen_summary.csv)
-- [Probes-to-target](results/learned/full/probes_to_target.csv)
-- [Sensitivity measurements](results/learned/full/sensitivity.csv)
-- [Sensitivity summary](results/learned/full/sensitivity_summary.csv)
-- [Coverage verification](results/learned/full/coverage.json)
+- [Protocol](results_summary/protocol.json)
+- [Main per-run metrics](results_summary/metrics.csv)
+- [Summary](results_summary/summary.csv)
+- [Seen seed summary](results_summary/seen_summary.csv)
+- [Unseen seed summary](results_summary/unseen_summary.csv)
+- [Probes-to-target](results_summary/probes_to_target.csv)
+- [Sensitivity measurements (gzip)](results_summary/sensitivity.csv.gz)
+- [Sensitivity summary](results_summary/sensitivity_summary.csv)
+- [Coverage verification](results_summary/coverage.json)
 
-- [Training-input audit](results/learned/full/training_audit.csv)
+- [Training-input audit](results_summary/training_audit.csv)
 
 Raw checkpoints, training histories, cached predictions, explicit probe IDs, and per-run main cost-quality curves are retained under `results/learned/full/`. The small export contains the metrics and summary figures rather than duplicating those larger caches.
 

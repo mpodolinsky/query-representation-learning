@@ -22,7 +22,7 @@ from preproc.data import load_data, unseen_instances, sample_probes
 from .features import SentenceFeatures, baselines, fingerprint
 from .train import TrainConfig, make_fit
 from .evaluation import MetricContext, Policy, lambda_grid, select_k
-from .experiments import REPRESENTATIONS, save_metrics
+from .experiments import REPRESENTATIONS, REPRESENTATION_CHOICES, save_metrics
 
 K_GRID = (5, 10, 20, 50, 100, 200)
 SENSITIVITY_K = K_GRID + (400,)
@@ -281,7 +281,7 @@ def parser():
     p.add_argument("--splits", nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--training-seeds", nargs="+", type=int, default=[0, 1, 2])
     p.add_argument("--probe-seeds", nargs="+", type=int, default=[0, 1, 2])
-    p.add_argument("--representations", nargs="+", choices=REPRESENTATIONS, default=list(REPRESENTATIONS))
+    p.add_argument("--representations", nargs="+", choices=REPRESENTATION_CHOICES, default=list(REPRESENTATIONS))
     p.add_argument("--probe-budgets", nargs="+", type=int, default=[1, 5, 10, 20, 50, 100, 500])
     p.add_argument("--n-boot", type=int, default=1000)
     p.add_argument("--workers", type=int, default=3)
