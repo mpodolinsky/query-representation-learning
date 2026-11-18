@@ -1,0 +1,10 @@
+numpy>=2
+pandas
+pyarrow
+scikit-learn
+scipy
+threadpoolctl
+matplotlib
+torch>=2.2
+sentence-transformers>=3
+pytest
