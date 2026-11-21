@@ -30,6 +30,13 @@ is kept as a named ablation (`handcrafted_L123`), not in the default.
 | `test_handcrafted.py` | 39 tests on fake data, including the two scripts end to end (`python -m pytest -q` in this folder, about 15 s) |
 | `RESULTS.md` | the final tables and the findings, in plain sentences |
 | `HARNESS_NOTES.md` | proposed harness changes and interface questions for Michal and Arman |
+| `compare_representations.py` | **the unified comparison**: every representation of the project (ours, Nikhilesh's frozen / regression / contrastive, the concatenations, the MLP on [sentence, handcrafted]) on his protocol with our Level-1/2 labels; resumable; exports embeddings |
+| `embedding_views.py` | PCA and t-SNE small multiples of any representation by theme / Level 1 / Level 2, plus kNN label purity, linear-probe accuracy and silhouette ("is it just task type?") |
+| `paired_tests.py` | paired bootstrap over the test queries of the *difference* between two representations (interval, p-value), per split and summarized across splits |
+| `build_report.py` | assembles `REPORT.md` from Nikhilesh's `results_summary/`, `analysis/`, `analysis_compare/` and `results_compare/` |
+| `test_compare.py` | 6 tests of the four scripts above on fake data with a stub sentence encoder (needs torch) |
+| `run_compare_all.sh`, `sbatch/` | launch the unified comparison (six detached processes, or the Vista SLURM job), create the environment, download the encoder |
+| `REPORT.md` | the generated report (methods, data, results, observations, what is pending) |
 
 ## The features
 
@@ -230,6 +237,30 @@ bootstrap are the whole cost. Reduce `--probe-seeds`, `--n-grid` or `--n-boot-un
   held-out model, the mean in bold, the seen gain dashed, and the region where the router does worse than the
   single best shaded), `A_unseen(n)` per variant, and with `--pca` the task-type panels, the per-model quality map
   and the explained-variance plot of the three variants.
+
+## The unified comparison (all representations, our labels)
+
+Nikhilesh's grid (`results_summary/`) uses the benchmark theme as the task type and his own three-statistic
+handcrafted block. `compare_representations.py` reruns his protocol (final pool + every release instance, probe
+budgets 1 … 500, three probe seeds, three training seeds, k tuned on the validation split, 1,000 bootstrap resamples)
+with every representation side by side: `task_type_theme`, `task_type_L1`, `task_type_L2`, `task_type_L12`, `stats`,
+`handcrafted`, `handcrafted_nik`, `frozen`, `combined` (frozen + ours), `regression`, `contrastive`, and
+`regression_hc` / `contrastive_hc` (his MLP trained on [sentence vector, our handcrafted block]). It writes the
+harness's own results folders plus one flat `results_compare/metrics.csv` in his column layout, and exports the
+final-pool embedding of every representation for the views. It needs torch and the sentence encoder
+(`learned/requirements.txt`; `sbatch/setup_env.sh`, `sbatch/download_encoder.sh`), or `--encoder stub` for a dry run.
+
+```bash
+python compare_representations.py --encode-only                         # cache the sentence vectors (GPU: --device cuda)
+PY=$SCRATCH/envs/qrl/bin/python THREADS=8 bash run_compare_all.sh        # six processes; resumable; logs in results_compare/logs
+python compare_representations.py --dry-run --encoder stub               # how many shards are done
+python embedding_views.py                                                # PCA / t-SNE / label purity of the exported embeddings
+python paired_tests.py --compare-root ../results_compare --reference handcrafted --n-probes 5 50 500
+python build_report.py                                                   # REPORT.md
+```
+
+`paired_tests.py --results-root ../results` and `embedding_views.py --from-variants stats handcrafted ...` work on the
+handcrafted-only runs without the encoder.
 
 ## Open assumptions about Arman's data (checklist to verify when the data lands)
 
