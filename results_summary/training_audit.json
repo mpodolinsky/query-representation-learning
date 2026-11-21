@@ -1,0 +1,7 @@
+{
+  "complete": true,
+  "training_roles_checked": 792,
+  "unique_checkpoints": 486,
+  "held_out_model_violations": 0,
+  "external_split_violations": 0
+}

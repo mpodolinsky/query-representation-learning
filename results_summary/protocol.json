@@ -1,0 +1,87 @@
+{
+  "output": "results/learned/full",
+  "feature_cache": "results/learned/cache",
+  "benchmarks": [
+    "llmrouterbench",
+    "routerbench"
+  ],
+  "splits": [
+    0,
+    1,
+    2
+  ],
+  "training_seeds": [
+    0,
+    1,
+    2
+  ],
+  "probe_seeds": [
+    0,
+    1,
+    2
+  ],
+  "representations": [
+    "task_type",
+    "handcrafted",
+    "frozen",
+    "combined",
+    "regression",
+    "contrastive"
+  ],
+  "probe_budgets": [
+    1,
+    5,
+    10,
+    20,
+    50,
+    100,
+    500
+  ],
+  "n_boot": 1000,
+  "k_grid": [
+    5,
+    10,
+    20,
+    50,
+    100,
+    200
+  ],
+  "sensitivity_k": [
+    5,
+    10,
+    20,
+    50,
+    100,
+    200,
+    400
+  ],
+  "variants": [
+    "reference",
+    "k5",
+    "k10",
+    "k20",
+    "k50",
+    "k100",
+    "k200",
+    "k400",
+    "lambda_points100",
+    "lambda_points1000",
+    "lambda_range_wide",
+    "lambda_range_narrow"
+  ],
+  "training": {
+    "objective": "regression",
+    "hidden_dim": 128,
+    "embedding_dim": 64,
+    "epochs": 50,
+    "batch_size": 128,
+    "learning_rate": 0.001,
+    "patience": 5,
+    "stop_fraction": 0.1,
+    "threshold": 0.1,
+    "margin": 1.0,
+    "seed": 0,
+    "device": "cpu"
+  },
+  "validation_bootstrap": 200
+}
