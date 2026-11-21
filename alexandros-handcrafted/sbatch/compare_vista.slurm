@@ -38,6 +38,6 @@ echo "== grid finished at $(date)"
 
 echo "== 3/3 views, paired tests, report"
 $PY alexandros-handcrafted/embedding_views.py || echo "views failed (rc=$?)"
-$PY alexandros-handcrafted/paired_tests.py --compare-root results_compare --reference handcrafted --n-probes 5 50 500 || echo "paired tests failed (rc=$?)"
+OMP_NUM_THREADS=1 $PY alexandros-handcrafted/paired_tests.py --compare-root results_compare --reference handcrafted --n-probes 5 50 500 --workers 48 || echo "paired tests failed (rc=$?)"
 $PY alexandros-handcrafted/build_report.py
 echo "== $(date) done"

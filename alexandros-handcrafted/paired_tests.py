@@ -164,6 +164,7 @@ def parse_args(argv=None):
     p.add_argument("--probe-seeds", nargs="+", type=int, default=[0])
     p.add_argument("--cross-seeds", action="store_true", help="also pair different training seeds")
     p.add_argument("--n-boot", type=int, default=1000)
+    p.add_argument("--workers", type=int, default=1, help="processes for the comparisons (each one is ~10-30 s)")
     p.add_argument("--benchmark", default=None)
     p.add_argument("--loader", default=None)
     p.add_argument("--out", default=str(HERE / "analysis_compare"))
@@ -176,20 +177,21 @@ def main(argv=None):
         raise SystemExit("give --results-root and/or --compare-root")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    rows = []
+    tasks = []
     for (ctx_a, ctx_b), label, run_a, run_b in comparisons(args):
         if args.benchmark and label["benchmark"] != args.benchmark:
             continue
         if ctx_a["folder"] != ctx_b["folder"] and (ctx_a["models"] != ctx_b["models"] or ctx_a["split_seed"] != ctx_b["split_seed"]):
             continue
-        # both runs must be on the same pool and split; the test scores come from ctx_a
-        ctx = dict(ctx_a)
-        d = paired_difference(ctx, run_a, run_b, args.n_boot) if ctx_a["folder"] == ctx_b["folder"] else \
-            _paired_across_folders(ctx_a, ctx_b, run_a, run_b, args.n_boot)
-        rows.append({**label, **d})
-        print(f"{label['benchmark']} split {label['split_seed']} {label['setting']:6s} {label['new_model'] or '-':30s} "
-              f"n={label['n_probes']:<4} {label['a']:18s} - {label['b']:18s} d_gain={d['d_gain']:+.4f} "
-              f"[{d['d_gain_ci_low']:+.4f}, {d['d_gain_ci_high']:+.4f}] p={d['d_gain_p']:.3f}", flush=True)
+        tasks.append((ctx_a, ctx_b, label, run_a, run_b, args.n_boot))
+    print(f"{len(tasks)} paired comparisons, {args.workers} worker(s)", flush=True)
+    if args.workers > 1:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context("fork")) as pool:
+            rows = list(pool.map(_task, tasks, chunksize=4))
+    else:
+        rows = [_task(t) for t in tasks]
     df = pd.DataFrame(rows)
     if df.empty:
         raise SystemExit("no comparable runs found")
@@ -209,6 +211,17 @@ def main(argv=None):
         lines += [f"## {title}", "", markdown_table(s), ""]
     (out / "paired_summary.md").write_text("\n".join(lines))
     print(f"\nwritten to {out}")
+
+
+def _task(t):
+    """One paired comparison (runs in a worker): both runs are on the same pool and split; test scores from ctx_a."""
+    ctx_a, ctx_b, label, run_a, run_b, n_boot = t
+    d = paired_difference(dict(ctx_a), run_a, run_b, n_boot) if ctx_a["folder"] == ctx_b["folder"] else \
+        _paired_across_folders(ctx_a, ctx_b, run_a, run_b, n_boot)
+    print(f"{label['benchmark']} split {label['split_seed']} {label['setting']:6s} {label['new_model'] or '-':30s} "
+          f"n={label['n_probes']:<4} {label['a']:18s} - {label['b']:18s} d_gain={d['d_gain']:+.4f} "
+          f"[{d['d_gain_ci_low']:+.4f}, {d['d_gain_ci_high']:+.4f}] p={d['d_gain_p']:.3f}", flush=True)
+    return {**label, **d}
 
 
 def _paired_across_folders(ctx_a, ctx_b, run_a, run_b, n_boot):
