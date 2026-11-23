@@ -1,0 +1,5 @@
+{
+  "passed": 91,
+  "skipped": 1,
+  "command": "python -m pytest -q preproc michal-harness learned"
+}

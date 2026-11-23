@@ -1,0 +1,21 @@
+{
+  "benchmark": "llmrouterbench",
+  "instance": 10,
+  "split_seed": 0,
+  "embedding": "task_type",
+  "n_probes": 10,
+  "probe_seed": 1,
+  "k": 200,
+  "original_harness_results": [
+    {
+      "n_lambdas": 500,
+      "A": 0.571262241148305,
+      "gain": -0.18064759932440377
+    },
+    {
+      "n_lambdas": 1000,
+      "A": 0.6421035553789074,
+      "gain": -0.07904100997291474
+    }
+  ]
+}
