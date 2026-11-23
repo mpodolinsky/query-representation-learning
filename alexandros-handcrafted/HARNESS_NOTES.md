@@ -54,6 +54,20 @@ Things I ran into while plugging the handcrafted representation into `michal-har
    untracked analysis folder or a stray log marks every run dirty. `--untracked-files=no` would make the flag mean
    "uncommitted changes to tracked files", which is what one wants to know when matching results to a commit.
 
+7. **One k for the pool and the new model is an artefact in the unseen setting (found 2026-11-22, unified run).**
+   `evaluate` uses the tuned k for every model; the new model has labels on n probes, so its estimate averages
+   min(k, n) probes and is one constant per query once k ≥ n. With the k grid up to 1000 every statistics- or
+   sentence-based representation selects k = 1000 (the one-standard-error rule picks the largest k whose validation
+   area is within one SE), so at every budget up to 500 the new model's estimate is its probe mean. In a representation
+   organized by quality (the learned embeddings) the pool models' estimates are low exactly on the hard queries, the
+   constant new-model estimate wins there, and the router sends the hard queries to the new (expensive) model, which
+   fails on them too: regression goes from +4.2% (k = 200) to −3.5% (k ≥ 500) on LLMRouterBench instance 10 at 500
+   probes, contrastive from −3.7% to −15% (`alexandros-handcrafted/analysis_compare/k_unseen_check.csv`). Your grid cap
+   at 200 hides this at 500 probes and shows it at 5–100. Proposal: give the new model its own k, bounded by the
+   probes, e.g. `k_new = min(k, max(1, n_probes // 2))`, or tune `k_new` by leave-one-out on the probes; both are a
+   few lines in `evaluate` (the `knn_estimate` call on `E[probe_ids]`). Until then, compare representations in the
+   unseen setting only at a fixed k < n, and report k next to every unseen number.
+
 ## For Arman (what my code assumes about `load_data`)
 
 See the checklist in `README.md`, "Open assumptions about the data". The short version: `load_data(benchmark,

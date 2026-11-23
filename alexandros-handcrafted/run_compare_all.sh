@@ -10,7 +10,8 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 PY=${PY:-python}
 THREADS=${THREADS:-4}
-OUT=${OUT:-$HERE/../results_compare}
+OUT=${OUT:-$HERE/../results_compare}      # relative paths are taken from the current directory
+OUT=$(mkdir -p "$OUT" && cd "$OUT" && pwd)
 mkdir -p "$OUT/logs"
 for b in llmrouterbench routerbench; do
   for s in 0 1 2; do

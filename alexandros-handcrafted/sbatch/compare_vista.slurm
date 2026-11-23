@@ -20,24 +20,28 @@ cd "${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
 PY="${PY:-$SCRATCH/envs/qrl/bin/python}"
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 TOKENIZERS_PARALLELISM=false TIKTOKEN_CACHE_DIR="${TIKTOKEN_CACHE_DIR:-$SCRATCH/tiktoken_cache}"
 EXTRA="${EXTRA:-}"                                   # extra compare_representations.py arguments, e.g. "--seen-only"
+OUT="${OUT:-results_compare}"                        # results folder; a run with another protocol needs its own, e.g.
+ANALYSIS="${ANALYSIS:-alexandros-handcrafted/analysis_compare}"   # OUT=results_compare_k200 EXTRA="--k-grid 5 10 20 50 100 200"
+mkdir -p "$OUT/logs"                                  # ANALYSIS=alexandros-handcrafted/analysis_compare_k200
 
 echo "== $(date) job $SLURM_JOB_ID on $(hostname)"
 $PY -c "import torch, sentence_transformers, sklearn, numpy; print('torch', torch.__version__, 'cuda', torch.cuda.is_available(), 'numpy', numpy.__version__)"
 
 echo "== 1/3 sentence vectors (GPU)"
-$PY alexandros-handcrafted/compare_representations.py --encode-only --device cuda --batch-size 256
+$PY alexandros-handcrafted/compare_representations.py --encode-only --device cuda --batch-size 256 --output "$OUT"
 
 echo "== 2/3 the grid: six processes"
-PY="$PY" THREADS=12 bash alexandros-handcrafted/run_compare_all.sh $EXTRA
+PY="$PY" THREADS=12 OUT="$OUT" bash alexandros-handcrafted/run_compare_all.sh $EXTRA
 sleep 30
 while pgrep -f "compare_representations.py --benchmarks" > /dev/null; do
     sleep 120
-    $PY alexandros-handcrafted/compare_representations.py --dry-run --encoder stub $EXTRA 2>/dev/null | grep "shards done" || true
+    $PY alexandros-handcrafted/compare_representations.py --dry-run --encoder stub --output "$OUT" $EXTRA 2>/dev/null | grep "shards done" || true
 done
 echo "== grid finished at $(date)"
 
 echo "== 3/3 views, paired tests, report"
-$PY alexandros-handcrafted/embedding_views.py || echo "views failed (rc=$?)"
-OMP_NUM_THREADS=1 $PY alexandros-handcrafted/paired_tests.py --compare-root results_compare --reference handcrafted --n-probes 5 50 500 --workers 48 || echo "paired tests failed (rc=$?)"
-$PY alexandros-handcrafted/build_report.py
+$PY alexandros-handcrafted/embedding_views.py --embeddings "$OUT/embeddings" --out "$ANALYSIS" || echo "views failed (rc=$?)"
+OMP_NUM_THREADS=1 $PY alexandros-handcrafted/paired_tests.py --compare-root "$OUT" --reference handcrafted --n-probes 5 50 500 --workers 48 --out "$ANALYSIS" || echo "paired tests failed (rc=$?)"
+$PY alexandros-handcrafted/k_unseen_check.py --out "$ANALYSIS" || echo "k check failed (rc=$?)"
+$PY alexandros-handcrafted/build_report.py --unified "$OUT/metrics.csv" --analysis "$ANALYSIS"
 echo "== $(date) done"

@@ -375,8 +375,8 @@ def unified_section(facts):
                 sd=("gain", lambda s: seen.loc[s.index].groupby("split_seed").gain.mean().std(ddof=0))).reset_index()
     rows = [[r.benchmark, r.embedding, f"{pct(r.gain)} ± {pct(r.sd, sign=False)}", "± " + pct(r.half, sign=False), num(r.A), int(r.n)]
             for r in agg.sort_values(["benchmark", "gain"], ascending=[True, False]).itertuples()]
-    splits = sorted(m.split_seed.unique())
-    lines += [f"Final pool, seen setting; splits {splits}, training seeds {sorted(m.train_seed.unique())}.", "",
+    splits = [int(x) for x in sorted(m.split_seed.unique())]
+    lines += [f"Final pool, seen setting; splits {splits}, training seeds {[int(x) for x in sorted(m.train_seed.unique())]}.", "",
               table(rows, ["benchmark", "representation", "gain ± sd over splits", "bootstrap 95% half-width", "A", "runs"]), ""]
     facts["unified_seen"] = agg.to_dict("records")
     if (m.setting == "unseen").any():
@@ -449,85 +449,119 @@ def views_section():
     return lines
 
 
+def k_check_section():
+    t = read(CMP / "k_unseen_check.csv")
+    if t is None:
+        return ["_(analysis_compare/k_unseen_check.csv not found: run k_unseen_check.py)_", ""]
+    lines = ["The harness uses one k for every model. A new model has labels on n probes only, so its estimate averages "
+             "min(k, n) probes: with k ≥ n it is one constant for every query (the probe mean). The table fixes k and "
+             "shows the unseen gain at two budgets on a few release instances (split 0, one training and probe seed; "
+             "checkpoints from the unified run, nothing retrained). Cells with k ≥ n are marked †.", ""]
+    ks = sorted(t.k.unique())
+    for (bench, n), g in t.groupby(["benchmark", "n_probes"]):
+        piv = g.pivot_table(index=["representation", "instance"], columns="k", values="gain_unseen")
+        rows = []
+        for (rep, inst), r in piv.iterrows():
+            rows.append([bench, rep, int(inst)] + [pct(r[k]) + (" †" if k >= n else "") for k in ks])
+        lines += [f"n = {n} probes:", "", table(rows, ["benchmark", "representation", "instance"] + [f"k = {k}" for k in ks]), ""]
+    return lines
+
+
 # ---------------------------------------------------------------- observations and pending
 
-def seen_unseen_sentence(facts):
-    rows = facts.get("nik_seen_unseen")
-    if not rows:
-        return ""
-    df = pd.DataFrame(rows)
-    parts = []
-    for bench, g in df.groupby("benchmark"):
-        lead_seen = g.sort_values("gain_seen", ascending=False).embedding.iloc[0]
-        lead_500 = g.sort_values("gain_unseen_500", ascending=False).embedding.iloc[0]
-        hc = g[g.embedding == "handcrafted"].iloc[0]
-        fr = g[g.embedding == "frozen"].iloc[0]
-        parts.append(f"On {bench} `{lead_seen}` leads the seen setting and `{lead_500}` the unseen setting at 500 probes; "
-                     f"handcrafted against frozen is {pct(hc.gain_seen)} vs {pct(fr.gain_seen)} seen and "
-                     f"{pct(hc.gain_unseen_500)} vs {pct(fr.gain_unseen_500)} unseen (n = 500).")
-    return " ".join(parts)
+def _u(facts, bench, emb, key="gain"):
+    for r in facts.get("unified_seen", []):
+        if r["benchmark"] == bench and r["embedding"] == emb:
+            return r[key]
+    return float("nan")
+
+
+def _su(facts, bench, emb, key):
+    for r in facts.get("unified_seen_unseen", []):
+        if r["benchmark"] == bench and r["embedding"] == emb:
+            return r.get(key, float("nan"))
+    return float("nan")
 
 
 def observations(facts):
     f = facts
-    nk = lambda b, e, k="gain": f.get(f"nik_seen_{b}_{e}", {}).get(k, np.nan)
-    mn = lambda b, e, k="gain": f.get(f"mine_seen_{b}_{e}", {}).get(k, np.nan)
-    lines = ["## 6. Observations", "",
-        f"1. **Every representation beats the single best model in the seen setting, by {pct(nk('llmrouterbench', 'task_type'))}"
-        f"–{pct(nk('llmrouterbench', 'combined'))} on LLMRouterBench and {pct(nk('routerbench', 'task_type'))}–{pct(nk('routerbench', 'combined'))} "
-        "on RouterBench** (Nikhilesh's grid), with per-run bootstrap half-widths of about ±1.0–1.5 points, so the gains "
-        "themselves are not noise, but the differences between the better representations are of the order of one split "
-        "standard deviation.",
-        f"2. **The learned embeddings do not beat the frozen or handcrafted ones in the seen setting.** Regression is at "
-        f"{pct(nk('llmrouterbench', 'regression'))} / {pct(nk('routerbench', 'regression'))} against {pct(nk('llmrouterbench', 'frozen'))} / "
-        f"{pct(nk('routerbench', 'frozen'))} for the frozen sentence vector it is trained from; contrastive is the weakest "
-        f"representation on LLMRouterBench ({pct(nk('llmrouterbench', 'contrastive'))}). The task-type recovery ratios are "
-        "0.96–1.02: the theme one-hot alone does about as well as either learned embedding.",
-        f"3. **Concatenation wins where it was tried.** `combined` (sentence vector + handcrafted) is the best entry in "
-        f"Nikhilesh's seen tables ({pct(nk('llmrouterbench', 'combined'))} and {pct(nk('routerbench', 'combined'))}); "
-        "balancing the blocks changes it by less than a split sd.",
-        f"4. **Within the handcrafted family, the query statistics carry most of the signal.** Our `handcrafted` "
-        f"(L1 + L2 + 15 statistics) gains {pct(mn('llmrouterbench', 'handcrafted'))} / {pct(mn('routerbench', 'handcrafted'))}; "
-        f"the statistics alone {pct(mn('llmrouterbench', 'stats'))} / {pct(mn('routerbench', 'stats'))}; the Level-1 label alone "
-        f"{pct(mn('llmrouterbench', 'task_type_L1'))} / {pct(mn('routerbench', 'task_type_L1'))}. On RouterBench the statistics "
-        "identify the theme almost perfectly (99% test accuracy) yet beat the theme one-hot by 3 points: within a theme, "
-        "length and code/math markers still separate easy from hard queries. The free-text Level 3 is not worth its "
-        "thousands of columns.",
-        "5. **Seen versus unseen: no reversal.** " + seen_unseen_sentence(f) +
-        " The hypothesis \"handcrafted is best when the models are known, frozen when a model is new\" is not "
-        "supported by Nikhilesh's grid: a representation that leads in the seen setting keeps roughly its place with a "
-        "new model, and the loss with a new model is the probe budget, not the representation. With our `handcrafted`, "
-        "5 probes recover 55% (LLMRouterBench) and 66% (RouterBench) of the seen gain, 50 probes 64% and 84%, 500 probes "
-        "80% and 85%; with one probe the router can lose to the single best on a third of the models. The unified "
-        "comparison (section 5.3) repeats the test with the same features on both sides and paired intervals.",
-        "6. **Is the learned embedding just task type?** Section 5.5 gives, per representation, the share of a query's "
-        "10 nearest neighbours with the same label and a linear probe's accuracy. The task-type one-hots have 100% purity "
-        "for their own level by construction, and `handcrafted` keeps it (99.8% / 99.9% at Level 1): with the balanced "
-        "weighting, a neighbour is first a same-domain query. The statistics alone reach 65% / 77% Level-1 purity (majority "
-        "37% / 32%), i.e. length and markers identify the domain only partly, yet they route better than the Level-1 "
-        "one-hot (observation 4). The purity and probe numbers of `frozen`, `regression` and `contrastive` on the real "
-        "encoder appear once the unified run has exported their embeddings.",
-        "7. **k is the sensitive hyperparameter, not λ.** Fixed k = 5 or 10 changes A by up to 0.1 (LLMRouterBench) and 0.3 "
-        "(RouterBench) in single runs; the λ grid density and range change it by less than 0.002 at the 95th percentile. "
-        "Every variant containing the statistics selects the top of the k grid: the router is a wide local average.",
+    u = lambda b, e: pct(_u(f, b, e))
+    su = lambda b, e, k: pct(_su(f, b, e, k))
+    rec = lambda b, e, n: num(_su(f, b, e, f"recovery_{n}"), 2)
+    have = bool(f.get("unified_seen"))
+    lines = ["## 6. Observations", ""]
+    if not have:
+        lines += ["_(The unified comparison has not been run; see the earlier observations in the git history of this file.)_", ""]
+        return lines
+    L, R = "llmrouterbench", "routerbench"
+    lines += [
+        f"1. **Every representation beats the single best model in the seen setting**: from {u(L, 'contrastive')} (contrastive) "
+        f"to {u(L, 'handcrafted_nik')} on LLMRouterBench and from {u(R, 'task_type_L1')} (Level-1 label alone) to "
+        f"{u(R, 'regression_hc')} on RouterBench (unified run, section 5.3). Per-run bootstrap half-widths are about ±1.3 "
+        "points on LLMRouterBench and ±0.8 on RouterBench, so the gains are real but the top of each table is a cluster: "
+        "on LLMRouterBench no paired interval separates `handcrafted_nik`, `task_type_theme`, `handcrafted`, "
+        "`regression_hc`, `combined` or `stats` from `handcrafted` (section 5.4).",
+        f"2. **Where the learned embeddings help, it is with the handcrafted block as input, and only on RouterBench.** "
+        f"`regression_hc` ({u(R, 'regression_hc')}) and `contrastive_hc` ({u(R, 'contrastive_hc')}) beat `handcrafted` "
+        f"({u(R, 'handcrafted')}) by 0.5–0.6 points with the paired interval excluding zero on all three splits; plain "
+        f"`regression` ({u(R, 'regression')}) is a smaller, unconfirmed gain. On LLMRouterBench the learned embeddings are "
+        f"at or below the frozen input and the handcrafted block ({u(L, 'regression')} regression, {u(L, 'contrastive')} "
+        "contrastive, the latter significantly worse on every split). Task-type recovery A(label)/A(learned) is 0.95–1.03 "
+        "for every level: a one-hot label routes about as well as either learned embedding in the seen setting.",
+        f"3. **The LLM task hierarchy does not beat the benchmark's own theme as a one-hot, and adds little inside the "
+        f"handcrafted block.** Theme one-hot {u(L, 'task_type_theme')} / {u(R, 'task_type_theme')} against Level 1 + 2 "
+        f"{u(L, 'task_type_L12')} / {u(R, 'task_type_L12')}; our `handcrafted` (L1 + L2 + 15 statistics) "
+        f"{u(L, 'handcrafted')} / {u(R, 'handcrafted')} against Nikhilesh's (theme + 3 lengths) "
+        f"{u(L, 'handcrafted_nik')} / {u(R, 'handcrafted_nik')}: both pairs are within one split sd. The query statistics "
+        f"carry most of the signal (`stats` alone {u(L, 'stats')} / {u(R, 'stats')}); on RouterBench, where the themes are "
+        "datasets, any label alone is 3.5–4.8 points behind the statistics because the 9.8k MMLU training queries span "
+        "every domain and the label cannot separate easy from hard inside a dataset.",
+        f"4. **With a new model, the representations that do not depend on the model scores hold up; the learned ones "
+        f"collapse, and section 5.7 shows why.** At 500 probes on LLMRouterBench: `stats` {su(L, 'stats', 'gain_unseen_500')}, "
+        f"`combined` {su(L, 'combined', 'gain_unseen_500')}, `handcrafted` {su(L, 'handcrafted', 'gain_unseen_500')}, `frozen` "
+        f"{su(L, 'frozen', 'gain_unseen_500')} (recovery {rec(L, 'stats', 500)}–{rec(L, 'frozen', 500)} of the seen gain), against "
+        f"`regression` {su(L, 'regression', 'gain_unseen_500')} and `contrastive` {su(L, 'contrastive', 'gain_unseen_500')}: worse "
+        "than the single best. The cause is not the representation itself but the shared k: every statistics- or "
+        "sentence-based representation selects k = 1000 on the validation split, and with k ≥ n probes the new model's "
+        "estimate is one constant. In a space organized by quality, the pool models' estimates are low exactly on the "
+        "hard queries, so the constant new-model estimate wins there and the router sends the hard queries to the "
+        "expensive new model, which fails on them too. With k = 200 < 500 probes (Nikhilesh's grid) `regression` is as good "
+        "as `frozen` on the same instances (section 5.7, +4.2% vs +4.1% and +3.6% vs +3.4%), not better; at 50 probes the "
+        "same collapse appears for k = 200 in both grids. So the answer to \"are handcrafted features best on seen models "
+        "and frozen embeddings best on new ones\" is: in the seen setting they tie on LLMRouterBench and the learned-with-"
+        "handcrafted MLP leads on RouterBench; with a new model the frozen and handcrafted representations are robust and "
+        "the learned ones are only as good as the harness lets the new model's estimate be local. The fix is a harness "
+        "change (a separate, probe-bounded k for the new model), noted in HARNESS_NOTES.md.",
+        f"5. **The learned embeddings are not \"just task type\"; they carry less of it than their frozen input.** Share of "
+        f"a query's 10 nearest neighbours with the same Level-1 domain (section 5.5): frozen 81% / 87%, regression 66% / 78%, "
+        "contrastive 54% / 78% (majority class 37% / 32%), against 100% for the label one-hots and 99.8% for `handcrafted`. "
+        "Training on quality profiles moves queries by how the models behave on them, not by topic: the t-SNE of `frozen` "
+        "shows topic clusters (code, math, trivia), that of `regression` a quality-ordered band with every domain spread "
+        "along it. The `_hc` variants carry more task type (76–89%) because the handcrafted block is in their input, which is "
+        "where their RouterBench gain comes from.",
+        "6. **k is the sensitive hyperparameter, not λ.** Fixed k = 5 or 10 changes A by up to 0.1 (LLMRouterBench) and 0.3 "
+        "(RouterBench); the λ grid changes it by less than 0.002 at the 95th percentile. The one-standard-error rule selects "
+        "the top of the grid for every statistics- or sentence-based representation (1000 here, 200 in Nikhilesh's grid): "
+        "the validation curve is flat, the router is a wide local average, and the cap of the grid decides the unseen "
+        "numbers through observation 4. The seen gains move little between the two grids (frozen +4.9% at k = 200, +4.1% at "
+        "k = 1000 on LLMRouterBench).",
         ""]
     return lines
 
 
 def pending():
     return ["## 7. What is pending and how to reproduce", "",
-        "Pending (needs the sentence encoder and a compute node; Alexandros runs these):", "",
-        "1. The unified comparison with our labels: `bash alexandros-handcrafted/run_compare_all.sh` (six detached processes, "
-        "one per benchmark and split; resumable) after `python alexandros-handcrafted/compare_representations.py --encode-only`. "
-        "Or the SLURM job `alexandros-handcrafted/sbatch/compare_vista.slurm`.",
-        "2. The views of the frozen and learned embeddings: `python alexandros-handcrafted/embedding_views.py` (reads "
-        "`results_compare/embeddings/`).",
-        "3. Paired tests on the unified run: `python alexandros-handcrafted/paired_tests.py --compare-root results_compare "
-        "--reference handcrafted --n-probes 5 50 500`.",
-        "4. `python alexandros-handcrafted/build_report.py` to refresh this report.", "",
-        "Already in the repository: Nikhilesh's grid (`results_summary/`, `learned/README.md`), the handcrafted runs "
-        "(`alexandros-handcrafted/RESULTS.md`, `analysis/`), the task labels (`preproc/data/<benchmark>/task_labels.parquet`, "
-        "`labeling/`), the paired comparisons and views of the handcrafted variants (`analysis_compare/`).", ""]
+        "Done: Nikhilesh's grid (`results_summary/`), the handcrafted runs (`alexandros-handcrafted/RESULTS.md`), the task "
+        "labels (`preproc/data/<benchmark>/task_labels.parquet`), the unified comparison (`results_compare/`, SLURM job "
+        "1159197, 6 h 42 min on one Vista GH200 node), its paired tests, views and k check (`analysis_compare/`).", "",
+        "Open:", "",
+        "1. A like-for-like rerun with Nikhilesh's k grid, so that the unseen numbers of all representations are on his "
+        "protocol: `OUT=results_compare_k200 ANALYSIS=alexandros-handcrafted/analysis_compare_k200 "
+        "EXTRA=\"--k-grid 5 10 20 50 100 200\" sbatch alexandros-handcrafted/sbatch/compare_vista.slurm` (the MLP "
+        "checkpoints and sentence vectors are cached, so it is faster than the first run).",
+        "2. The harness change that removes the artefact of observation 4: a probe-bounded k for the new model "
+        "(e.g. k_new = min(k, n/2)), or k_new tuned on the probes. Proposed to Michal in HARNESS_NOTES.md.",
+        "3. Rebuild: `python alexandros-handcrafted/build_report.py` then `python alexandros-handcrafted/report_html.py --out <file>`.", ""]
 
 
 # ---------------------------------------------------------------- main
@@ -544,7 +578,10 @@ def build():
              "scores (by regression or contrastively). Two benchmarks (LLMRouterBench, RouterBench), three splits, a "
              "replayed release timeline for the unseen-model setting, 1,000-sample bootstrap intervals per run, paired "
              "intervals for differences between representations, and PCA/t-SNE views of every representation coloured "
-             "by task type at three levels of granularity. The observations are in section 6.", ""]
+             "by task type at three levels of granularity. Two pipelines were run: Nikhilesh's grid (section 5.1–5.2) and "
+             "the unified comparison that puts every representation, including the LLM-assigned task hierarchy and the "
+             "learned embeddings with the handcrafted block as input, on one protocol (5.3–5.7). The observations are in "
+             "section 6.", ""]
     lines += data_section(facts)
     lines += methods_section()
     lines += ["## 4. Protocol summary", "",
@@ -572,15 +609,21 @@ def build():
     lines += views_section()
     lines += ["### 5.6 Task-type recovery, probes-to-target and sensitivity", ""]
     lines += nik_rq1a_ptt_sens()
+    lines += ["### 5.7 One k for the pool and the new model: how the neighbourhood size interacts with the probe budget", ""]
+    lines += k_check_section()
     lines += observations(facts)
     lines += pending()
     return "\n".join(lines), facts
 
 
 def main(argv=None):
+    global UNIFIED, CMP
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", default=str(HERE / "REPORT.md"))
+    p.add_argument("--unified", default=str(UNIFIED), help="metrics.csv of the unified comparison")
+    p.add_argument("--analysis", default=str(CMP), help="folder of the paired tests, views and k check")
     args = p.parse_args(argv)
+    UNIFIED, CMP = Path(args.unified), Path(args.analysis)
     text, facts = build()
     Path(args.out).write_text(text)
     (Path(args.out).parent / "report_data.json").write_text(json.dumps(facts, indent=1, default=float))
