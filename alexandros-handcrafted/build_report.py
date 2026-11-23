@@ -443,9 +443,11 @@ def views_section():
         for (bench, rep), items in sorted(by_rep.items()):
             lines.append(f"- {bench}, `{rep}`: " + ", ".join(f"[{kind} by {lab}]({rel(v)})" for kind, lab, v in sorted(items)))
         lines.append("")
-        pick = [v for v in views if v.name.endswith("_tsne_task_level1.png")][:4]
-        for v in pick:
-            lines += [f"![{v.stem}]({rel(v)})", ""]
+        wanted = [f"{b}_{r}_tsne_task_level1.png" for b in ("llmrouterbench", "routerbench") for r in ("frozen", "regression", "contrastive", "handcrafted")]
+        for name in wanted:
+            v = CMP / "views" / name
+            if v.exists():
+                lines += [f"![{v.stem}]({rel(v)})", ""]
     return lines
 
 
@@ -519,7 +521,7 @@ def observations(facts):
         f"4. **With a new model, the representations that do not depend on the model scores hold up; the learned ones "
         f"collapse, and section 5.7 shows why.** At 500 probes on LLMRouterBench: `stats` {su(L, 'stats', 'gain_unseen_500')}, "
         f"`combined` {su(L, 'combined', 'gain_unseen_500')}, `handcrafted` {su(L, 'handcrafted', 'gain_unseen_500')}, `frozen` "
-        f"{su(L, 'frozen', 'gain_unseen_500')} (recovery {rec(L, 'stats', 500)}–{rec(L, 'frozen', 500)} of the seen gain), against "
+        f"{su(L, 'frozen', 'gain_unseen_500')} (recovery {rec(L, 'handcrafted', 500)}–{rec(L, 'stats', 500)} of the seen gain), against "
         f"`regression` {su(L, 'regression', 'gain_unseen_500')} and `contrastive` {su(L, 'contrastive', 'gain_unseen_500')}: worse "
         "than the single best. The cause is not the representation itself but the shared k: every statistics- or "
         "sentence-based representation selects k = 1000 on the validation split, and with k ≥ n probes the new model's "
@@ -527,7 +529,10 @@ def observations(facts):
         "hard queries, so the constant new-model estimate wins there and the router sends the hard queries to the "
         "expensive new model, which fails on them too. With k = 200 < 500 probes (Nikhilesh's grid) `regression` is as good "
         "as `frozen` on the same instances (section 5.7, +4.2% vs +4.1% and +3.6% vs +3.4%), not better; at 50 probes the "
-        "same collapse appears for k = 200 in both grids. So the answer to \"are handcrafted features best on seen models "
+        "same collapse appears for k = 200 in both grids, and at k = 20 < 50 `regression` is ahead of `frozen` (+0.9 to "
+        "+2.6% against +0.2 to +1.1%). On RouterBench the effect is absent (every representation keeps +2–7% at any k): "
+        "it needs a quality-organized space and a new model that is strong on the hard queries, as the 2025 flagships "
+        "of LLMRouterBench are. So the answer to \"are handcrafted features best on seen models "
         "and frozen embeddings best on new ones\" is: in the seen setting they tie on LLMRouterBench and the learned-with-"
         "handcrafted MLP leads on RouterBench; with a new model the frozen and handcrafted representations are robust and "
         "the learned ones are only as good as the harness lets the new model's estimate be local. The fix is a harness "
