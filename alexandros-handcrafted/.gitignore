@@ -1,0 +1,4 @@
+# generated locally, not for the repository
+analysis_compare/*.log
+analysis_compare/views/
+__pycache__/
